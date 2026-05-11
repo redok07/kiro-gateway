@@ -1,13 +1,30 @@
 # Environment
 .env
 .env.local
+.env.*
+!.env.example
 credentials.json
 state.json
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
 
 # IDE
 .vscode/
 .idea/
 .shard/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
 
 # Python
 __pycache__/
@@ -22,6 +39,14 @@ build/
 # Debug logs (generated when DEBUG_MODE is enabled)
 debug_logs*/
 debug*.json
+
+# Local databases (may contain tokens if KIRO_CLI_DB_FILE points here)
+*.sqlite3
+*.sqlite
+*.db
+
+# Ad-hoc logs
+*.log
 
 # Project-specific
 _notes/
