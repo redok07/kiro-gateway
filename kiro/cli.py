@@ -444,7 +444,7 @@ def _show_accounts_list(config_path: str) -> None:
 
 
 def _get_account_status(file_path: str) -> str:
-    """Check credential file existence and token expiry."""
+    """Check credential file existence and token expiry with detailed remaining time."""
     import json
     from pathlib import Path
     from datetime import datetime, timezone
@@ -465,14 +465,20 @@ def _get_account_status(file_path: str) -> str:
         exp = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
         now = datetime.now(timezone.utc)
         remaining = exp - now
+        total_seconds = remaining.total_seconds()
 
-        if remaining.total_seconds() <= 0:
+        if total_seconds <= 0:
             return f"{RED}EXPIRED{RESET}"
-        elif remaining.total_seconds() < 600:
-            return f"{YELLOW}{int(remaining.total_seconds() / 60)}m left{RESET}"
+        elif total_seconds < 60:
+            return f"{RED}{int(total_seconds)}s left{RESET}"
+        elif total_seconds < 3600:
+            mins = int(total_seconds / 60)
+            color = YELLOW if total_seconds < 600 else GREEN
+            return f"{color}{mins}m left{RESET}"
         else:
-            hours = remaining.total_seconds() / 3600
-            return f"{GREEN}{hours:.1f}h left{RESET}"
+            hours = int(total_seconds // 3600)
+            mins = int((total_seconds % 3600) // 60)
+            return f"{GREEN}{hours}h {mins}m left{RESET}"
     except Exception:
         return f"{YELLOW}unknown{RESET}"
 
