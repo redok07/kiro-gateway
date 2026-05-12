@@ -619,46 +619,32 @@ def parse_cli_args() -> argparse.Namespace:
     """
     Parse command-line arguments for server configuration.
     
-    CLI arguments have the highest priority, overriding both
-    environment variables and default values.
+    Supports subcommands for CLI management and direct server start.
+    Running without arguments opens the interactive menu.
     
     Returns:
-        Parsed arguments namespace with host and port values
+        Parsed arguments namespace
     """
     parser = argparse.ArgumentParser(
         description=f"{APP_TITLE} - {APP_DESCRIPTION}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Configuration Priority (highest to lowest):
-  1. CLI arguments (--host, --port)
-  2. Environment variables (SERVER_HOST, SERVER_PORT)
-  3. Default values (0.0.0.0:8000)
+Commands:
+  (no command)                            # Interactive menu
+  start                                   # Start server in background
+  stop                                    # Stop background server
+  status                                  # Show server status
+  logs                                    # View recent logs
+  serve                                   # Run server in foreground (legacy)
+  setup-path                              # Register 'kiro-gateway' command
 
 Examples:
-  python main.py                          # Use defaults or env vars
-  python main.py --port 9000              # Override port only
-  python main.py --host 127.0.0.1         # Local connections only
-  python main.py -H 0.0.0.0 -p 8080       # Short form
-  
-  SERVER_PORT=9000 python main.py         # Via environment
-  uvicorn main:app --port 9000            # Via uvicorn directly
+  kiro-gateway                            # Interactive menu
+  kiro-gateway start                      # Start in background
+  kiro-gateway start --port 9000          # Start with custom port
+  kiro-gateway serve                      # Foreground (old behavior)
+  kiro-gateway stop                       # Stop background server
         """
-    )
-    
-    parser.add_argument(
-        "-H", "--host",
-        type=str,
-        default=None,  # None means "use env or default"
-        metavar="HOST",
-        help=f"Server host address (default: {DEFAULT_SERVER_HOST}, env: SERVER_HOST)"
-    )
-    
-    parser.add_argument(
-        "-p", "--port",
-        type=int,
-        default=None,  # None means "use env or default"
-        metavar="PORT",
-        help=f"Server port (default: {DEFAULT_SERVER_PORT}, env: SERVER_PORT)"
     )
     
     parser.add_argument(
@@ -666,6 +652,46 @@ Examples:
         action="version",
         version=f"%(prog)s {APP_VERSION}"
     )
+    
+    subparsers = parser.add_subparsers(dest="command")
+    
+    # serve: run in foreground (legacy behavior)
+    serve_parser = subparsers.add_parser("serve", help="Run server in foreground")
+    serve_parser.add_argument(
+        "-H", "--host", type=str, default=None, metavar="HOST",
+        help=f"Server host (default: {DEFAULT_SERVER_HOST})"
+    )
+    serve_parser.add_argument(
+        "-p", "--port", type=int, default=None, metavar="PORT",
+        help=f"Server port (default: {DEFAULT_SERVER_PORT})"
+    )
+    
+    # start: background
+    start_parser = subparsers.add_parser("start", help="Start server in background")
+    start_parser.add_argument(
+        "-H", "--host", type=str, default=None, metavar="HOST",
+        help=f"Server host (default: {DEFAULT_SERVER_HOST})"
+    )
+    start_parser.add_argument(
+        "-p", "--port", type=int, default=None, metavar="PORT",
+        help=f"Server port (default: {DEFAULT_SERVER_PORT})"
+    )
+    
+    # stop
+    subparsers.add_parser("stop", help="Stop background server")
+    
+    # status
+    subparsers.add_parser("status", help="Show server status")
+    
+    # logs
+    logs_parser = subparsers.add_parser("logs", help="View server logs")
+    logs_parser.add_argument(
+        "-n", "--lines", type=int, default=50,
+        help="Number of lines to show (default: 50)"
+    )
+    
+    # setup-path
+    subparsers.add_parser("setup-path", help="Register 'kiro-gateway' command in PATH")
     
     return parser.parse_args()
 
@@ -754,28 +780,35 @@ def print_startup_banner(host: str, port: int) -> None:
 # --- Entry Point ---
 if __name__ == "__main__":
     import uvicorn
+    from kiro.cli import run_cli, start_server, stop_server, show_status, view_logs, setup_path
     
     # Parse CLI arguments first (handles --version, --help without requiring config)
     args = parse_cli_args()
     
-    # Run configuration validation before starting server
-    validate_configuration()
-    
-    # Warn about suboptimal timeout configuration
-    _warn_timeout_configuration()
-    
-    # Resolve final configuration with priority hierarchy
-    final_host, final_port = resolve_server_config(args)
-    
-    # Print startup banner
-    print_startup_banner(final_host, final_port)
-    
-    logger.info(f"Starting Uvicorn server on {final_host}:{final_port}...")
-    
-    # Use string reference to avoid double module import
-    uvicorn.run(
-        "main:app",
-        host=final_host,
-        port=final_port,
-        log_config=UVICORN_LOG_CONFIG,
-    )
+    # Route to appropriate command
+    if args.command is None:
+        # No subcommand: interactive menu
+        run_cli()
+    elif args.command == "start":
+        start_server(host=args.host, port=args.port)
+    elif args.command == "stop":
+        stop_server()
+    elif args.command == "status":
+        show_status()
+    elif args.command == "logs":
+        view_logs(lines=args.lines)
+    elif args.command == "setup-path":
+        setup_path()
+    elif args.command == "serve":
+        # Legacy foreground mode
+        validate_configuration()
+        _warn_timeout_configuration()
+        final_host, final_port = resolve_server_config(args)
+        print_startup_banner(final_host, final_port)
+        logger.info(f"Starting Uvicorn server on {final_host}:{final_port}...")
+        uvicorn.run(
+            "main:app",
+            host=final_host,
+            port=final_port,
+            log_config=UVICORN_LOG_CONFIG,
+        )
