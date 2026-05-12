@@ -1300,3 +1300,463 @@ class TestFormatDuration:
         """Test formatting days."""
         assert _format_duration(86400) == "1d"
         assert _format_duration(172800) == "2d"
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+def _make_manager_with_accounts(
+    tmp_path,
+    account_ids: list,
+    model: str = "claude-opus-4.5",
+) -> AccountManager:
+    """
+    Create an AccountManager with pre-initialized accounts (no real I/O).
+
+    Each account gets a mocked auth_manager and model_resolver so that
+    get_next_account() can return them without hitting the network.
+
+    Args:
+        tmp_path: pytest tmp_path fixture value
+        account_ids: List of string IDs for the accounts to create
+        model: Model name that every account's resolver will advertise
+
+    Returns:
+        Configured AccountManager instance
+    """
+    creds_file = tmp_path / "credentials.json"
+    creds_file.write_text("[]")
+
+    manager = AccountManager(
+        credentials_file=str(creds_file),
+        state_file=str(tmp_path / "state.json"),
+    )
+
+    for account_id in account_ids:
+        account = Account(id=account_id)
+
+        mock_auth = AsyncMock()
+        mock_auth.force_refresh = AsyncMock(return_value="token")
+        account.auth_manager = mock_auth
+
+        mock_resolver = MagicMock()
+        mock_resolver.get_available_models.return_value = [model]
+        account.model_resolver = mock_resolver
+
+        # Fresh cache timestamp — prevents TTL refresh branch (network call)
+        account.models_cached_at = time.time()
+
+        manager._accounts[account_id] = account
+
+    return manager
+
+
+# =============================================================================
+# TestRoundRobinRotation
+# =============================================================================
+
+class TestRoundRobinRotation:
+    """Tests for smart round-robin rotation strategy."""
+
+    @pytest.mark.asyncio
+    @patch("kiro.account_manager.ROTATION_STRATEGY", "round_robin")
+    async def test_round_robin_cycles_through_accounts(self, tmp_path):
+        """
+        Test that round-robin cycles A→B→C→A→B→C across 6 calls.
+
+        What it does: Calls get_next_account() 6 times with 3 accounts
+        Purpose: Verify round-robin advances the global index after each selection
+        """
+        print("\n=== Test: round_robin cycles through accounts ===")
+
+        # Arrange
+        ids = ["account_A", "account_B", "account_C"]
+        manager = _make_manager_with_accounts(tmp_path, ids)
+        manager._current_account_index = 0
+
+        # Act
+        results = []
+        for _ in range(6):
+            account = await manager.get_next_account("claude-opus-4.5")
+            results.append(account.id)
+
+        # Assert
+        print(f"Rotation sequence: {results}")
+        assert results == ["account_A", "account_B", "account_C",
+                           "account_A", "account_B", "account_C"]
+
+    @pytest.mark.asyncio
+    @patch("kiro.account_manager.ROTATION_STRATEGY", "round_robin")
+    @patch("kiro.account_manager.random")
+    async def test_round_robin_skips_circuit_breaker_blocked(self, mock_random, tmp_path):
+        """
+        Test that blocked accounts (circuit breaker) are skipped in round-robin.
+
+        What it does: Marks account_B as blocked, calls get_next_account() 4 times
+        Purpose: Verify blocked accounts are skipped, yielding A→C→A→C
+        """
+        print("\n=== Test: round_robin skips circuit-breaker-blocked account ===")
+
+        # Arrange
+        ids = ["account_A", "account_B", "account_C"]
+        manager = _make_manager_with_accounts(tmp_path, ids)
+        manager._current_account_index = 0
+
+        # Block account_B: failures > 0 and failure is recent
+        manager._accounts["account_B"].failures = 3
+        manager._accounts["account_B"].last_failure_time = time.time()
+
+        # Ensure probabilistic retry never fires (random() > 0.1 → skip)
+        mock_random.random.return_value = 0.5
+
+        # Act
+        results = []
+        for _ in range(4):
+            account = await manager.get_next_account("claude-opus-4.5")
+            results.append(account.id)
+
+        # Assert
+        print(f"Rotation sequence (B blocked): {results}")
+        assert "account_B" not in results
+        assert results == ["account_A", "account_C", "account_A", "account_C"]
+
+    @pytest.mark.asyncio
+    @patch("kiro.account_manager.ROTATION_STRATEGY", "round_robin")
+    async def test_round_robin_wraps_around_correctly(self, tmp_path):
+        """
+        Test that the index wraps from the last position back to 0.
+
+        What it does: Sets index to last position, calls get_next_account() twice
+        Purpose: Verify modulo wrap-around works correctly
+        """
+        print("\n=== Test: round_robin wraps around from last index ===")
+
+        # Arrange
+        ids = ["account_A", "account_B", "account_C"]
+        manager = _make_manager_with_accounts(tmp_path, ids)
+        manager._current_account_index = 2  # Start at last account (C)
+
+        # Act
+        first = await manager.get_next_account("claude-opus-4.5")
+        second = await manager.get_next_account("claude-opus-4.5")
+
+        # Assert
+        print(f"First: {first.id}, Second: {second.id}")
+        assert first.id == "account_C"
+        assert second.id == "account_A"  # Wrapped around
+
+    @pytest.mark.asyncio
+    @patch("kiro.account_manager.ROTATION_STRATEGY", "round_robin")
+    async def test_round_robin_with_exclude_accounts(self, tmp_path):
+        """
+        Test that exclude_accounts parameter skips specified accounts.
+
+        What it does: Excludes account_B, verifies it never appears in results
+        Purpose: Verify failover exclusion mechanism works with round-robin
+        """
+        print("\n=== Test: round_robin respects exclude_accounts ===")
+
+        # Arrange
+        ids = ["account_A", "account_B", "account_C"]
+        manager = _make_manager_with_accounts(tmp_path, ids)
+        manager._current_account_index = 0
+
+        # Act — exclude B on every call
+        results = []
+        for _ in range(4):
+            account = await manager.get_next_account(
+                "claude-opus-4.5",
+                exclude_accounts={"account_B"},
+            )
+            results.append(account.id)
+
+        # Assert
+        print(f"Results with B excluded: {results}")
+        assert "account_B" not in results
+        for r in results:
+            assert r in ("account_A", "account_C")
+
+    @pytest.mark.asyncio
+    @patch("kiro.account_manager.ROTATION_STRATEGY", "round_robin")
+    async def test_round_robin_single_account_bypass(self, tmp_path):
+        """
+        Test that a single account bypasses the circuit breaker entirely.
+
+        What it does: Sets failures=10 on the only account, calls get_next_account()
+        Purpose: Verify single-account special case ignores circuit breaker
+        """
+        print("\n=== Test: single account bypasses circuit breaker ===")
+
+        # Arrange
+        manager = _make_manager_with_accounts(tmp_path, ["account_only"])
+
+        # Simulate a heavily failed account
+        manager._accounts["account_only"].failures = 10
+        manager._accounts["account_only"].last_failure_time = time.time()
+
+        # Act
+        account = await manager.get_next_account("claude-opus-4.5")
+
+        # Assert
+        print(f"Got account: {account}")
+        assert account is not None
+        assert account.id == "account_only"
+
+
+# =============================================================================
+# TestStickyMode
+# =============================================================================
+
+class TestStickyMode:
+    """Tests for sticky rotation strategy (backward compatibility)."""
+
+    @pytest.mark.asyncio
+    @patch("kiro.account_manager.ROTATION_STRATEGY", "sticky")
+    async def test_sticky_mode_preserves_account_after_success(self, tmp_path):
+        """
+        Test that sticky mode keeps returning the same account after report_success.
+
+        What it does: Gets an account, reports success, verifies next call returns same
+        Purpose: Verify sticky behavior — successful account is preferred
+        """
+        print("\n=== Test: sticky mode preserves account after success ===")
+
+        # Arrange
+        ids = ["account_A", "account_B", "account_C"]
+        manager = _make_manager_with_accounts(tmp_path, ids)
+        manager._current_account_index = 0
+
+        # Act
+        first = await manager.get_next_account("claude-opus-4.5")
+        await manager.report_success(first.id, "claude-opus-4.5")
+        second = await manager.get_next_account("claude-opus-4.5")
+
+        # Assert
+        print(f"First: {first.id}, After success: {second.id}")
+        assert second.id == first.id
+
+    @pytest.mark.asyncio
+    @patch("kiro.account_manager.ROTATION_STRATEGY", "sticky")
+    @patch("kiro.account_manager.random")
+    async def test_sticky_mode_failover_on_failure(self, mock_random, tmp_path):
+        """
+        Test that sticky mode fails over to a different account after circuit breaker trips.
+
+        What it does: Reports RECOVERABLE failures on account_A until blocked, then
+                      verifies get_next_account() returns a different account
+        Purpose: Verify sticky mode still respects circuit breaker for failover
+        """
+        print("\n=== Test: sticky mode fails over when circuit breaker trips ===")
+
+        # Arrange
+        ids = ["account_A", "account_B", "account_C"]
+        manager = _make_manager_with_accounts(tmp_path, ids)
+        manager._current_account_index = 0
+
+        # Trip circuit breaker on account_A
+        manager._accounts["account_A"].failures = 5
+        manager._accounts["account_A"].last_failure_time = time.time()
+
+        # Ensure probabilistic retry never fires
+        mock_random.random.return_value = 0.5
+
+        # Act — sticky index still points to A (index 0), but A is blocked
+        account = await manager.get_next_account("claude-opus-4.5")
+
+        # Assert
+        print(f"Failover account: {account.id}")
+        assert account is not None
+        assert account.id != "account_A"
+
+
+# =============================================================================
+# TestBackgroundRefresh
+# =============================================================================
+
+class TestBackgroundRefresh:
+    """Tests for background token refresh task with auto-recovery."""
+
+    @pytest.mark.asyncio
+    @patch("kiro.account_manager.BACKGROUND_REFRESH_INTERVAL", 0.01)
+    async def test_background_refresh_calls_force_refresh_on_all(self, tmp_path):
+        """
+        Test that background refresh calls force_refresh() on all initialized accounts.
+
+        What it does: Starts refresh, waits for one cycle, stops, checks call counts
+        Purpose: Verify all accounts are refreshed each cycle
+        """
+        print("\n=== Test: background refresh calls force_refresh on all accounts ===")
+
+        # Arrange
+        ids = ["account_A", "account_B", "account_C"]
+        manager = _make_manager_with_accounts(tmp_path, ids)
+
+        # Act
+        manager.start_background_refresh()
+        await asyncio.sleep(0.05)  # Allow at least one full cycle
+        await manager.stop_background_refresh()
+
+        # Assert
+        for account_id in ids:
+            call_count = manager._accounts[account_id].auth_manager.force_refresh.call_count
+            print(f"{account_id} force_refresh calls: {call_count}")
+            assert call_count >= 1, f"{account_id} was not refreshed"
+
+    @pytest.mark.asyncio
+    @patch("kiro.account_manager.BACKGROUND_REFRESH_INTERVAL", 0.01)
+    async def test_background_refresh_auto_recovery(self, tmp_path):
+        """
+        Test that a successful refresh resets the circuit breaker on a dead account.
+
+        What it does: Sets failures=3 on an account, runs one refresh cycle,
+                      verifies failures reset to 0
+        Purpose: Verify auto-recovery via background refresh
+        """
+        print("\n=== Test: background refresh auto-recovery resets circuit breaker ===")
+
+        # Arrange
+        manager = _make_manager_with_accounts(tmp_path, ["account_dead"])
+        manager._accounts["account_dead"].failures = 3
+        manager._accounts["account_dead"].last_failure_time = time.time()
+
+        # Act
+        manager.start_background_refresh()
+        await asyncio.sleep(0.05)
+        await manager.stop_background_refresh()
+
+        # Assert
+        account = manager._accounts["account_dead"]
+        print(f"Failures after recovery: {account.failures}")
+        print(f"Last failure time after recovery: {account.last_failure_time}")
+        assert account.failures == 0
+        assert account.last_failure_time == 0
+
+    @pytest.mark.asyncio
+    @patch("kiro.account_manager.BACKGROUND_REFRESH_INTERVAL", 0.01)
+    async def test_background_refresh_error_resilience(self, tmp_path):
+        """
+        Test that a failure on one account does not prevent others from refreshing.
+
+        What it does: Makes account_A's force_refresh raise, verifies B and C still refresh
+        Purpose: Verify per-account error isolation in the refresh loop
+        """
+        print("\n=== Test: background refresh continues after per-account error ===")
+
+        # Arrange
+        ids = ["account_A", "account_B", "account_C"]
+        manager = _make_manager_with_accounts(tmp_path, ids)
+
+        # Make account_A always fail
+        manager._accounts["account_A"].auth_manager.force_refresh = AsyncMock(
+            side_effect=Exception("Simulated auth failure")
+        )
+
+        # Act
+        manager.start_background_refresh()
+        await asyncio.sleep(0.05)
+        await manager.stop_background_refresh()
+
+        # Assert — B and C must have been refreshed despite A failing
+        b_calls = manager._accounts["account_B"].auth_manager.force_refresh.call_count
+        c_calls = manager._accounts["account_C"].auth_manager.force_refresh.call_count
+        print(f"account_B calls: {b_calls}, account_C calls: {c_calls}")
+        assert b_calls >= 1, "account_B was not refreshed"
+        assert c_calls >= 1, "account_C was not refreshed"
+
+        # Task must still be done (stopped cleanly, not crashed)
+        assert manager._refresh_task is None
+
+    @pytest.mark.asyncio
+    @patch("kiro.account_manager.BACKGROUND_REFRESH_INTERVAL", 0.01)
+    async def test_background_refresh_skips_uninitialized(self, tmp_path):
+        """
+        Test that accounts with auth_manager=None are silently skipped.
+
+        What it does: Creates an account without auth_manager, runs refresh cycle
+        Purpose: Verify no AttributeError when uninitialized accounts are present
+        """
+        print("\n=== Test: background refresh skips uninitialized accounts ===")
+
+        # Arrange
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text("[]")
+        manager = AccountManager(
+            credentials_file=str(creds_file),
+            state_file=str(tmp_path / "state.json"),
+        )
+
+        # Add one uninitialized account (auth_manager=None)
+        manager._accounts["account_uninit"] = Account(id="account_uninit")
+        assert manager._accounts["account_uninit"].auth_manager is None
+
+        # Act — must not raise
+        manager.start_background_refresh()
+        await asyncio.sleep(0.05)
+        await manager.stop_background_refresh()
+
+        # Assert — task completed cleanly
+        print("No AttributeError raised — uninitialized account was skipped")
+        assert manager._refresh_task is None
+
+    @pytest.mark.asyncio
+    @patch("kiro.account_manager.BACKGROUND_REFRESH_INTERVAL", 0.01)
+    async def test_background_refresh_graceful_shutdown(self, tmp_path):
+        """
+        Test that stop_background_refresh() cancels the task without propagating CancelledError.
+
+        What it does: Starts refresh, immediately stops it
+        Purpose: Verify graceful shutdown — no CancelledError leaks to caller
+        """
+        print("\n=== Test: background refresh graceful shutdown ===")
+
+        # Arrange
+        manager = _make_manager_with_accounts(tmp_path, ["account_A"])
+
+        # Act — start then immediately stop (no await between)
+        manager.start_background_refresh()
+        assert manager._refresh_task is not None
+        assert not manager._refresh_task.done()
+
+        # Must not raise CancelledError
+        await manager.stop_background_refresh()
+
+        # Assert
+        print("stop_background_refresh() completed without error")
+        assert manager._refresh_task is None
+
+    @pytest.mark.asyncio
+    @patch("kiro.account_manager.BACKGROUND_REFRESH_INTERVAL", 0.01)
+    async def test_background_refresh_does_not_hold_manager_lock(self, tmp_path):
+        """
+        Test that self._lock is NOT held during force_refresh() network I/O.
+
+        What it does: Injects a side_effect that records lock state during refresh
+        Purpose: Verify the implementation releases the lock before I/O (no deadlock risk)
+        """
+        print("\n=== Test: background refresh does not hold manager lock during I/O ===")
+
+        # Arrange
+        manager = _make_manager_with_accounts(tmp_path, ["account_A"])
+        lock_states: list = []
+
+        async def _check_lock_not_held() -> str:
+            """Side effect that records whether the manager lock is held."""
+            lock_states.append(manager._lock.locked())
+            return "token"
+
+        manager._accounts["account_A"].auth_manager.force_refresh = AsyncMock(
+            side_effect=_check_lock_not_held
+        )
+
+        # Act
+        manager.start_background_refresh()
+        await asyncio.sleep(0.05)
+        await manager.stop_background_refresh()
+
+        # Assert
+        print(f"Lock states during force_refresh: {lock_states}")
+        assert len(lock_states) >= 1, "force_refresh was never called"
+        assert all(not held for held in lock_states), (
+            "Manager lock was held during force_refresh() — potential deadlock risk"
+        )

@@ -58,6 +58,8 @@ from kiro.config import (
     ACCOUNT_CACHE_TTL,
     STATE_SAVE_INTERVAL_SECONDS,
     FALLBACK_MODELS,
+    ROTATION_STRATEGY,
+    BACKGROUND_REFRESH_INTERVAL,
 )
 from kiro.utils import get_kiro_headers
 from kiro.account_errors import ErrorType
@@ -182,6 +184,7 @@ class AccountManager:
         self._dirty = False
         self._credentials_config: List[Dict] = []
         self._current_account_index: int = 0  # GLOBAL sticky index for all models
+        self._refresh_task: Optional[asyncio.Task] = None
     
     async def load_credentials(self) -> None:
         """
@@ -400,6 +403,92 @@ class AccountManager:
                     await self._save_state()
                     self._dirty = False
     
+    async def _background_refresh_tokens(self) -> None:
+        """
+        Background task for proactive token refresh across all accounts.
+
+        Refreshes tokens for ALL initialized accounts (including dead ones).
+        If a dead account refreshes successfully, resets its circuit breaker
+        state (auto-recovery).
+
+        Runs every BACKGROUND_REFRESH_INTERVAL seconds.
+        Does NOT hold self._lock during network I/O (force_refresh calls).
+        """
+        try:
+            while True:
+                await asyncio.sleep(BACKGROUND_REFRESH_INTERVAL)
+
+                # Snapshot accounts under lock (quick, no I/O)
+                async with self._lock:
+                    accounts_snapshot = [
+                        (account_id, account)
+                        for account_id, account in self._accounts.items()
+                        if account.auth_manager is not None
+                    ]
+
+                if not accounts_snapshot:
+                    continue
+
+                refreshed = 0
+                recovered = 0
+                failed = 0
+
+                for account_id, account in accounts_snapshot:
+                    try:
+                        # force_refresh() has its own per-instance lock — safe without self._lock
+                        await account.auth_manager.force_refresh()
+                        refreshed += 1
+
+                        # Auto-recovery: if account was dead, reset circuit breaker
+                        if account.failures > 0:
+                            async with self._lock:
+                                account.failures = 0
+                                account.last_failure_time = 0
+                                self._dirty = True
+                            recovered += 1
+                            logger.info(f"Account {account_id} auto-recovered via background refresh (circuit breaker reset)")
+
+                    except Exception as e:
+                        failed += 1
+                        logger.warning(f"Background refresh failed for {account_id}: {e}")
+
+                logger.info(f"Background token refresh cycle complete: {refreshed} refreshed, {recovered} recovered, {failed} failed")
+
+        except asyncio.CancelledError:
+            logger.debug("Background token refresh task cancelled")
+    
+    def start_background_refresh(self) -> None:
+        """
+        Start the background token refresh task.
+
+        Creates an asyncio task that periodically refreshes all account tokens.
+        Safe to call multiple times (no-op if already running).
+        """
+        if self._refresh_task is not None and not self._refresh_task.done():
+            logger.debug("Background refresh task already running")
+            return
+
+        self._refresh_task = asyncio.create_task(self._background_refresh_tokens())
+        logger.info(f"Background token refresh started (interval: {BACKGROUND_REFRESH_INTERVAL}s)")
+    
+    async def stop_background_refresh(self) -> None:
+        """
+        Stop the background token refresh task gracefully.
+
+        Cancels the task and waits for it to finish.
+        Safe to call multiple times (no-op if not running).
+        """
+        if self._refresh_task is None or self._refresh_task.done():
+            return
+
+        self._refresh_task.cancel()
+        try:
+            await self._refresh_task
+        except asyncio.CancelledError:
+            pass
+        self._refresh_task = None
+        logger.info("Background token refresh stopped")
+    
     async def _initialize_account(self, account_id: str) -> bool:
         """
         Initialize account (lazy initialization).
@@ -596,10 +685,10 @@ class AccountManager:
     
     async def get_next_account(self, model: str, exclude_accounts: Optional[set] = None) -> Optional[Account]:
         """
-        Get next available account for model (Circuit Breaker + Sticky).
+        Get next available account for model (Circuit Breaker + Sticky/Round-Robin).
         
         Implements:
-        - Sticky behavior (prefer successful account)
+        - Rotation strategy: "round_robin" (advance after each selection) or "sticky" (prefer successful account)
         - Circuit Breaker with exponential backoff
         - Probabilistic retry for "dead" accounts (10%)
         - TTL-based model cache refresh
@@ -709,6 +798,10 @@ class AccountManager:
                     continue
                 
                 # Account is suitable!
+                # Round-robin: advance index for next call
+                if ROTATION_STRATEGY == "round_robin":
+                    self._current_account_index = (current_index + 1) % len(all_account_ids)
+                    self._dirty = True
                 return account
             
             # All accounts unavailable
@@ -737,15 +830,16 @@ class AccountManager:
             account.stats.successful_requests += 1
             self._dirty = True
             
-            # GLOBAL STICKY: Update global current_account_index
-            all_account_ids = list(self._accounts.keys())
-            try:
-                successful_index = all_account_ids.index(account_id)
-                if self._current_account_index != successful_index:
-                    self._current_account_index = successful_index
-                    self._dirty = True
-            except ValueError:
-                pass
+            # GLOBAL STICKY: Update global current_account_index (only in sticky mode)
+            if ROTATION_STRATEGY == "sticky":
+                all_account_ids = list(self._accounts.keys())
+                try:
+                    successful_index = all_account_ids.index(account_id)
+                    if self._current_account_index != successful_index:
+                        self._current_account_index = successful_index
+                        self._dirty = True
+                except ValueError:
+                    pass
     
     async def report_failure(
         self,

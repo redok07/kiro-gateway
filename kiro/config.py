@@ -563,6 +563,19 @@ ACCOUNT_PROBABILISTIC_RETRY_CHANCE: float = float(os.getenv("ACCOUNT_PROBABILIST
 ACCOUNT_CACHE_TTL: int = int(os.getenv("ACCOUNT_CACHE_TTL", "43200"))
 
 # ==================================================================================================
+# Account Rotation Settings
+# ==================================================================================================
+
+# Strategy used to select the next account when multiple accounts are available
+# Valid values: "round_robin" (cycle through accounts in order), "sticky" (prefer last used account)
+ROTATION_STRATEGY: str = os.getenv("ROTATION_STRATEGY", "round_robin")
+
+# Interval in seconds for background token refresh across all accounts
+# Keeps tokens warm so requests don't stall waiting for a refresh
+# Default: 600 (10 minutes)
+BACKGROUND_REFRESH_INTERVAL: int = int(os.getenv("BACKGROUND_REFRESH_INTERVAL", "600"))
+
+# ==================================================================================================
 # State Persistence Settings
 # ==================================================================================================
 

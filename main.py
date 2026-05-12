@@ -529,14 +529,20 @@ async def lifespan(app: FastAPI):
     save_task = asyncio.create_task(
         app.state.account_manager.save_state_periodically()
     )
-    
+
+    # Start background token refresh task
+    app.state.account_manager.start_background_refresh()
+
     logger.info("Account system initialized successfully")
     
     yield
     
     # Graceful shutdown
     logger.info("Shutting down application...")
-    
+
+    # Stop background token refresh task
+    await app.state.account_manager.stop_background_refresh()
+
     # Cancel background task
     save_task.cancel()
     try:

@@ -41,7 +41,8 @@ class TestAccountSystemFullFlow:
         self,
         tmp_path,
         temp_account_credentials_files,
-        mock_list_models_response
+        mock_list_models_response,
+        monkeypatch
     ):
         """
         Test 137: Полный failover между двумя аккаунтами
@@ -50,6 +51,7 @@ class TestAccountSystemFullFlow:
         Purpose: Verify failover loop works end-to-end
         """
         print("\n=== Test 137: Full failover flow between two accounts ===")
+        monkeypatch.setattr("kiro.account_manager.ROTATION_STRATEGY", "sticky")
         
         # Arrange: Create credentials.json with two accounts
         creds_file = tmp_path / "credentials.json"
@@ -160,7 +162,8 @@ class TestAccountSystemFullFlow:
         self,
         tmp_path,
         temp_account_credentials_files,
-        mock_list_models_response
+        mock_list_models_response,
+        monkeypatch
     ):
         """
         Test 138: Sticky behavior обновляет global index
@@ -169,6 +172,7 @@ class TestAccountSystemFullFlow:
         Purpose: Ensure sticky behavior works across all models
         """
         print("\n=== Test 138: Sticky behavior updates global index ===")
+        monkeypatch.setattr("kiro.account_manager.ROTATION_STRATEGY", "sticky")
         
         # Arrange
         creds_file = tmp_path / "credentials.json"
