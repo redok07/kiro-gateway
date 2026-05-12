@@ -77,7 +77,12 @@ def _is_process_alive(pid: int) -> bool:
                 ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
                 capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW
             )
-            return str(pid) in result.stdout
+            # Match exact PID in CSV output (avoid substring matches like 42 in 4244)
+            for line in result.stdout.splitlines():
+                fields = line.strip().strip('"').split('","')
+                if len(fields) >= 2 and fields[1] == str(pid):
+                    return True
+            return False
         except OSError:
             return False
     else:
@@ -106,21 +111,30 @@ def start_server(host: Optional[str] = None, port: Optional[int] = None) -> bool
 
     ensure_data_dir()
 
-    final_host = host or SERVER_HOST or DEFAULT_SERVER_HOST
-    final_port = port or SERVER_PORT or DEFAULT_SERVER_PORT
+    final_host = host if host is not None else (SERVER_HOST or DEFAULT_SERVER_HOST)
+    final_port = port if port is not None else (SERVER_PORT or DEFAULT_SERVER_PORT)
 
     python_exe = sys.executable
     main_script = str(GATEWAY_ROOT / "main.py")
 
     cmd = [python_exe, main_script, "serve", "--host", final_host, "--port", str(final_port)]
 
-    log_handle = open(LOG_FILE, "a", encoding="utf-8")
-
     kwargs = {
-        "stdout": log_handle,
-        "stderr": log_handle,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "stdin": subprocess.DEVNULL,
         "cwd": str(GATEWAY_ROOT),
     }
+
+    # Redirect stdout/stderr to log file
+    try:
+        log_handle = open(LOG_FILE, "a", encoding="utf-8")
+    except OSError as e:
+        print(f"  {RED}Failed to open log file: {e}{RESET}")
+        return False
+
+    kwargs["stdout"] = log_handle
+    kwargs["stderr"] = log_handle
 
     if sys.platform == "win32":
         kwargs["creationflags"] = (
@@ -136,16 +150,19 @@ def start_server(host: Optional[str] = None, port: Optional[int] = None) -> bool
         log_handle.close()
         return False
 
-    # Give it a moment to start
+    # Close our handle - the child process has its own copy of the fd
+    log_handle.close()
+
+    # Give it a moment to start and check it didn't crash immediately
     time.sleep(1.5)
 
     if proc.poll() is not None:
-        print(f"  {RED}Server exited immediately. Check logs: {LOG_FILE}{RESET}")
-        log_handle.close()
+        exit_code = proc.returncode
+        print(f"  {RED}Server exited immediately (code: {exit_code}). Check logs:{RESET}")
+        print(f"  {DIM}{LOG_FILE}{RESET}")
         return False
 
     PID_FILE.write_text(str(proc.pid))
-    log_handle.close()
 
     print(f"  {GREEN}{BOLD}Server started successfully!{RESET}")
     print(f"  {DIM}PID: {proc.pid}{RESET}")
@@ -204,7 +221,7 @@ def show_status() -> None:
 
 def view_logs(lines: int = 50) -> None:
     """
-    Display recent server logs.
+    Display recent server logs (reads only tail, memory-safe for large files).
 
     Args:
         lines: Number of lines to show from the end.
@@ -214,9 +231,20 @@ def view_logs(lines: int = 50) -> None:
         return
 
     try:
-        content = LOG_FILE.read_text(encoding="utf-8", errors="replace")
-        all_lines = content.splitlines()
-        tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        # Read only the tail to avoid loading huge log files into memory
+        with open(LOG_FILE, "rb") as f:
+            # Seek from end, read last ~64KB max
+            try:
+                f.seek(0, 2)
+                file_size = f.tell()
+                read_size = min(file_size, 65536)
+                f.seek(-read_size, 2)
+            except OSError:
+                f.seek(0)
+            chunk = f.read().decode("utf-8", errors="replace")
+
+        all_lines = chunk.splitlines()
+        tail = all_lines[-lines:]
 
         print(f"  {DIM}--- Last {len(tail)} lines from {LOG_FILE} ---{RESET}")
         print()
