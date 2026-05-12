@@ -515,12 +515,31 @@ KIRO_REGION="us-east-1"
         Write-Host ""
         Write-Host "  Next steps:" -ForegroundColor White
         Write-Host "  1. Edit your config:  " -NoNewline; Write-Host "notepad $EnvFile" -ForegroundColor DarkGray
+        Write-Host "     Uncomment ONE auth method:"
+        Write-Host "     - KIRO_CREDS_FILE  (Kiro IDE JSON token file)" -ForegroundColor DarkGray
+        Write-Host "     - REFRESH_TOKEN    (direct refresh token)" -ForegroundColor DarkGray
+        Write-Host "     - KIRO_CLI_DB_FILE (kiro-cli SQLite database)" -ForegroundColor DarkGray
         Write-Host "  2. Restart terminal (PATH updated)"
         Write-Host "  3. Start the gateway: " -NoNewline; Write-Host "kiro-gateway" -ForegroundColor DarkGray
+        Write-Host "     (opens interactive menu: start/stop/status/login/configure)" -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Host "  Connect your client:" -ForegroundColor White
+        Write-Host "  Base URL:  " -NoNewline; Write-Host "http://localhost:2507/v1" -ForegroundColor Cyan
+        Write-Host "  API Key:   " -NoNewline; Write-Host "your PROXY_API_KEY value" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "  Example (OpenAI Python):" -ForegroundColor White
+        Write-Host '  client = OpenAI(base_url="http://localhost:2507/v1", api_key="YOUR_KEY")' -ForegroundColor DarkGray
+        Write-Host '  client.chat.completions.create(model="claude-sonnet-4", messages=[...])' -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Host "  Example (curl):" -ForegroundColor White
+        Write-Host '  curl http://localhost:2507/v1/chat/completions \' -ForegroundColor DarkGray
+        Write-Host '    -H "Authorization: Bearer YOUR_KEY" \' -ForegroundColor DarkGray
+        Write-Host '    -d ''{"model":"claude-sonnet-4","messages":[{"role":"user","content":"hi"}]}''' -ForegroundColor DarkGray
         Write-Host ""
         Write-Host "  Or start immediately: $BinDir\kiro-gateway.cmd" -ForegroundColor DarkGray
         Write-Host "  Upgrade later:        irm https://raw.githubusercontent.com/redok07/kiro-gateway/main/install.ps1 | iex" -ForegroundColor DarkGray
-        Write-Host "  Uninstall:            Remove-Item -Recurse $InstallDir" -ForegroundColor DarkGray
+        Write-Host "  Uninstall:            kiro-gateway (menu option 8) or Remove-Item -Recurse $InstallDir" -ForegroundColor DarkGray
+        Write-Host "  Docs:                 https://github.com/redok07/kiro-gateway#configuration" -ForegroundColor DarkGray
         Write-Host ""
     }
     finally {
