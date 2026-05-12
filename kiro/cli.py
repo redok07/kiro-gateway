@@ -119,11 +119,17 @@ def start_server(host: Optional[str] = None, port: Optional[int] = None) -> bool
     # Use module invocation so it works both in dev (python main.py) and pip-installed mode
     cmd = [python_exe, "-m", "kiro._entry", "serve", "--host", final_host, "--port", str(final_port)]
 
+    # Determine working directory: project root if dev, ~/.kiro-gateway if pip-installed
+    if (GATEWAY_ROOT / "main.py").exists():
+        work_dir = str(GATEWAY_ROOT)
+    else:
+        work_dir = str(DATA_DIR)
+
     kwargs = {
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
         "stdin": subprocess.DEVNULL,
-        "cwd": str(GATEWAY_ROOT),
+        "cwd": work_dir,
     }
 
     # Redirect stdout/stderr to log file
@@ -258,16 +264,34 @@ def view_logs(lines: int = 50) -> None:
 
 def configure_env() -> None:
     """Open .env file for editing or create from example."""
-    env_file = GATEWAY_ROOT / ".env"
+    # Priority: CWD .env (dev) > ~/.kiro-gateway/.env (pip-installed) > project root
+    cwd_env = Path.cwd() / ".env"
+    home_env = DATA_DIR / ".env"
+    project_env = GATEWAY_ROOT / ".env"
     env_example = GATEWAY_ROOT / ".env.example"
 
-    if not env_file.exists():
+    if cwd_env.exists():
+        env_file = cwd_env
+    elif home_env.exists():
+        env_file = home_env
+    elif project_env.exists():
+        env_file = project_env
+    else:
+        # Create in ~/.kiro-gateway/ for pip-installed, or CWD if project root exists
+        if GATEWAY_ROOT.exists() and (GATEWAY_ROOT / "main.py").exists():
+            env_file = project_env
+        else:
+            env_file = home_env
+
         if env_example.exists():
             shutil.copy2(env_example, env_file)
             print(f"  {GREEN}Created .env from .env.example{RESET}")
         else:
-            env_file.write_text("# Kiro Gateway Configuration\n# See .env.example for all options\n\nPROXY_API_KEY=\"my-super-secret-password-123\"\n")
+            env_file.parent.mkdir(parents=True, exist_ok=True)
+            env_file.write_text("# Kiro Gateway Configuration\n# See https://github.com/redok07/kiro-gateway#configuration\n\nPROXY_API_KEY=\"my-super-secret-password-123\"\nSERVER_HOST=\"0.0.0.0\"\nSERVER_PORT=\"2507\"\n")
             print(f"  {GREEN}Created new .env file{RESET}")
+
+    print(f"  {DIM}Config location: {env_file}{RESET}")
 
     # Try to open in editor
     editor = os.environ.get("EDITOR") or os.environ.get("VISUAL")
@@ -365,7 +389,13 @@ def _show_accounts_list(config_path: str) -> None:
 
     path = Path(config_path)
     if not path.is_absolute():
-        path = GATEWAY_ROOT / path
+        # Check multiple locations: CWD, project root, data dir
+        candidates = [
+            Path.cwd() / path,
+            GATEWAY_ROOT / path,
+            DATA_DIR / path,
+        ]
+        path = next((p for p in candidates if p.exists()), GATEWAY_ROOT / path)
 
     if not path.exists():
         print(f"  {DIM}No credentials.json found at {path}{RESET}")
@@ -650,25 +680,28 @@ def run_login_flow() -> None:
     print(f"  {DIM}Mode: {'headless' if headless else 'visible browser'}{RESET}")
     print()
 
-    # Build command
+    # Build command - password passed via env var to avoid exposure in process list
     cmd = [
         sys.executable, str(login_script),
         "login",
         "--email", email,
-        "--password", password,
     ]
     if not headless:
         cmd.append("--no-headless")
     if register:
         cmd.append("--register")
 
-    # Run the login script
+    # Run the login script with password in environment (not visible in ps/tasklist)
+    env = os.environ.copy()
+    env["KIRO_LOGIN_PASSWORD"] = password
+
     try:
         result = subprocess.run(
             cmd,
             cwd=str(GATEWAY_ROOT),
             capture_output=False,
             text=True,
+            env=env,
         )
         if result.returncode == 0:
             print()

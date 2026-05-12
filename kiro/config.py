@@ -30,11 +30,22 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from .env
+# Priority: CWD .env (dev/manual) > ~/.kiro-gateway/.env (pip-installed)
+_cwd_env = Path(".env")
+_home_env = Path.home() / ".kiro-gateway" / ".env"
+
+if _cwd_env.exists():
+    _active_env_file = str(_cwd_env.resolve())
+elif _home_env.exists():
+    _active_env_file = str(_home_env)
+else:
+    _active_env_file = ".env"  # fallback: let load_dotenv search
+
+load_dotenv(dotenv_path=_active_env_file if Path(_active_env_file).exists() else None)
 
 
-def _get_raw_env_value(var_name: str, env_file: str = ".env") -> Optional[str]:
+def _get_raw_env_value(var_name: str, env_file: Optional[str] = None) -> Optional[str]:
     """
     Read variable value from .env file without processing escape sequences.
     
@@ -44,12 +55,12 @@ def _get_raw_env_value(var_name: str, env_file: str = ".env") -> Optional[str]:
     
     Args:
         var_name: Environment variable name
-        env_file: Path to .env file (default ".env")
+        env_file: Path to .env file (default: auto-detected active env file)
     
     Returns:
         Raw variable value or None if not found
     """
-    env_path = Path(env_file)
+    env_path = Path(env_file) if env_file else Path(_active_env_file)
     if not env_path.exists():
         return None
     
@@ -507,11 +518,22 @@ WEB_SEARCH_ENABLED: bool = os.getenv("WEB_SEARCH_ENABLED", "true").lower() in ("
 # When true: enables full failover loop with Circuit Breaker
 ACCOUNT_SYSTEM: bool = os.getenv("ACCOUNT_SYSTEM", "false").lower() in ("true", "1", "yes")
 
-# Path to credentials configuration file
-ACCOUNTS_CONFIG_FILE: str = os.getenv("ACCOUNTS_CONFIG_FILE", "credentials.json")
+# Path to credentials configuration file (resolve relative to active env dir)
+_accounts_config_raw: str = os.getenv("ACCOUNTS_CONFIG_FILE", "credentials.json")
+if os.path.isabs(_accounts_config_raw):
+    ACCOUNTS_CONFIG_FILE: str = _accounts_config_raw
+else:
+    # Resolve relative paths against the directory containing .env
+    _env_dir = str(Path(_active_env_file).parent) if Path(_active_env_file).exists() else "."
+    ACCOUNTS_CONFIG_FILE: str = os.path.join(_env_dir, _accounts_config_raw)
 
 # Path to runtime state file
-ACCOUNTS_STATE_FILE: str = os.getenv("ACCOUNTS_STATE_FILE", "state.json")
+_accounts_state_raw: str = os.getenv("ACCOUNTS_STATE_FILE", "state.json")
+if os.path.isabs(_accounts_state_raw):
+    ACCOUNTS_STATE_FILE: str = _accounts_state_raw
+else:
+    _env_dir2 = str(Path(_active_env_file).parent) if Path(_active_env_file).exists() else "."
+    ACCOUNTS_STATE_FILE: str = os.path.join(_env_dir2, _accounts_state_raw)
 
 # ==================================================================================================
 # Circuit Breaker Settings

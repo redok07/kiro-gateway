@@ -1,6 +1,9 @@
 # Kiro Gateway - Zero-dependency installer for Windows
 # Usage: irm https://raw.githubusercontent.com/redok07/kiro-gateway/main/install.ps1 | iex
 #
+# If execution policy blocks this, run first:
+#   Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+#
 # This installer is fully autonomous. It will:
 #   1. Install Python 3.12 if not found (via winget or direct download)
 #   2. Install git if not found (via winget or direct download)
@@ -14,6 +17,9 @@
 # No pre-requisites needed - works on a fresh Windows install.
 
 $ErrorActionPreference = "Stop"
+
+# Ensure TLS 1.2 is available (required for GitHub/PyPI on older Windows)
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 $Repo = "https://github.com/redok07/kiro-gateway.git"
 $InstallDir = Join-Path $env:USERPROFILE ".kiro-gateway"
@@ -87,16 +93,22 @@ function Test-Network {
 
 # --- Find Python 3.10+ ---
 function Find-Python {
-    $candidates = @("python", "python3", "py")
+    # Disable Windows Store app execution aliases that intercept "python" command
+    $candidates = @("python", "python3")
     foreach ($cmd in $candidates) {
         try {
+            $cmdPath = Get-Command $cmd -ErrorAction SilentlyContinue
+            if (-not $cmdPath) { continue }
+            # Skip Windows Store stub (WindowsApps path)
+            if ($cmdPath.Source -match "WindowsApps") { continue }
+
             $output = & $cmd -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
             if ($LASTEXITCODE -eq 0 -and $output) {
                 $parts = $output.Trim().Split(".")
                 $major = [int]$parts[0]
                 $minor = [int]$parts[1]
                 if ($major -ge 3 -and $minor -ge 10) {
-                    return $cmd
+                    return $cmdPath.Source
                 }
             }
         } catch {
@@ -146,7 +158,9 @@ function Install-Python {
     New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
 
     $arch = if ([Environment]::Is64BitOperatingSystem) { "amd64" } else { "win32" }
-    $installerUrl = "https://www.python.org/ftp/python/3.12.8/python-3.12.8-$arch.exe"
+    # Use latest stable 3.12.x - check python.org if this 404s
+    $pyVersion = "3.12.8"
+    $installerUrl = "https://www.python.org/ftp/python/$pyVersion/python-$pyVersion-$arch.exe"
     $installerPath = Join-Path $TempDir "python-installer.exe"
 
     try {
@@ -233,6 +247,22 @@ function Refresh-SessionPath {
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $env:Path = "$machinePath;$userPath"
+
+    # Also check common Python install locations that might not be in registry yet
+    $commonPythonPaths = @(
+        "$env:LOCALAPPDATA\Programs\Python\Python312",
+        "$env:LOCALAPPDATA\Programs\Python\Python312\Scripts",
+        "$env:LOCALAPPDATA\Programs\Python\Python311",
+        "$env:LOCALAPPDATA\Programs\Python\Python311\Scripts",
+        "$env:ProgramFiles\Python312",
+        "$env:ProgramFiles\Python312\Scripts",
+        "$env:ProgramFiles\Git\cmd"
+    )
+    foreach ($p in $commonPythonPaths) {
+        if ((Test-Path $p) -and ($env:Path -notlike "*$p*")) {
+            $env:Path = "$p;$env:Path"
+        }
+    }
 }
 
 # --- Add to user PATH (idempotent) ---
@@ -297,7 +327,10 @@ function Test-Venv {
 function New-ApiKey {
     try {
         $bytes = New-Object byte[] 16
-        [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+        # Use RNGCryptoServiceProvider for PS 5.1 compatibility (.NET Framework)
+        $rng = [System.Security.Cryptography.RNGCryptoServiceProvider]::new()
+        $rng.GetBytes($bytes)
+        $rng.Dispose()
         $hex = [BitConverter]::ToString($bytes) -replace '-', ''
         return $hex.ToLower().Substring(0, 32)
     } catch {

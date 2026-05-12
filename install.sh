@@ -90,10 +90,21 @@ check_network() {
     done
 
     if [ "$connected" = false ]; then
-        # Last resort: try DNS
-        if command -v ping &>/dev/null; then
-            if ping -c 1 -W 3 github.com &>/dev/null; then
+        # Last resort: try DNS resolution (no network request needed)
+        if command -v getent &>/dev/null; then
+            if getent hosts github.com &>/dev/null; then
                 connected=true
+            fi
+        elif command -v host &>/dev/null; then
+            if host github.com &>/dev/null; then
+                connected=true
+            fi
+        elif command -v ping &>/dev/null; then
+            # ping -W is seconds on Linux, milliseconds on macOS - use -t on macOS
+            if [ "$(uname -s)" = "Darwin" ]; then
+                ping -c 1 -t 3 github.com &>/dev/null && connected=true
+            else
+                ping -c 1 -W 3 github.com &>/dev/null && connected=true
             fi
         fi
     fi
