@@ -88,19 +88,60 @@ irm https://raw.githubusercontent.com/redok07/kiro-gateway/main/install.ps1 | ie
 ### After Installation
 
 ```bash
-# 1. Edit config (set your PROXY_API_KEY and auth method)
+# 1. Edit config - uncomment ONE auth method:
+#    KIRO_CREDS_FILE  (Kiro IDE JSON token file)
+#    REFRESH_TOKEN    (direct refresh token)
+#    KIRO_CLI_DB_FILE (kiro-cli SQLite database)
 nano ~/.kiro-gateway/.env        # Linux/macOS
 notepad %USERPROFILE%\.kiro-gateway\.env  # Windows
 
-# 2. Start the gateway
+# 2. Start the gateway (opens interactive menu)
 kiro-gateway
 ```
 
-The server will be available at `http://localhost:8000`
+The server will be available at `http://localhost:2507`
+
+### Connect Your Client
+
+| Setting | Value |
+|---------|-------|
+| Base URL | `http://localhost:2507/v1` |
+| API Key | Your `PROXY_API_KEY` from `.env` |
+
+**OpenAI Python SDK:**
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:2507/v1", api_key="YOUR_PROXY_API_KEY")
+response = client.chat.completions.create(
+    model="claude-sonnet-4",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+```
+
+**Anthropic Python SDK:**
+```python
+from anthropic import Anthropic
+
+client = Anthropic(base_url="http://localhost:2507", api_key="YOUR_PROXY_API_KEY")
+message = client.messages.create(
+    model="claude-sonnet-4",
+    max_tokens=4096,
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+```
+
+**curl:**
+```bash
+curl http://localhost:2507/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_PROXY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-sonnet-4","messages":[{"role":"user","content":"hi"}]}'
+```
 
 > 💡 **Upgrade anytime** by re-running the same install command. Your config is preserved.
 
-> 💡 **Uninstall:** `rm -rf ~/.kiro-gateway` (Linux/macOS) or `Remove-Item -Recurse ~\.kiro-gateway` (Windows)
+> 💡 **Uninstall:** Run `kiro-gateway` and select menu option 8, or manually: `rm -rf ~/.kiro-gateway` (Linux/macOS) / `Remove-Item -Recurse ~\.kiro-gateway` (Windows)
 
 ---
 
