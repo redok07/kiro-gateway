@@ -374,6 +374,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                     
                     if request_data.stream:
                         # Streaming mode
+                        usage_collector: dict = {}
+                        
                         async def stream_wrapper():
                             streaming_error = None
                             client_disconnected = False
@@ -393,6 +395,16 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                                     request_messages=request_messages_raw,
                                     request_tools=request_tools_raw
                                 ):
+                                    # Capture credits from final chunk
+                                    if '"credits_used"' in chunk:
+                                        try:
+                                            data_str = chunk[len("data: "):].strip()
+                                            chunk_json = json.loads(data_str)
+                                            cu = chunk_json.get("usage", {}).get("credits_used")
+                                            if cu:
+                                                usage_collector["credits_used"] = cu
+                                        except (json.JSONDecodeError, ValueError, TypeError):
+                                            pass
                                     yield chunk
                             except GeneratorExit:
                                 client_disconnected = True
@@ -406,6 +418,10 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                                 raise
                             finally:
                                 await http_client.close()
+                                # Report credit usage from streaming
+                                credits = usage_collector.get("credits_used")
+                                if credits:
+                                    await account_manager.report_usage(account.id, credits)
                                 if streaming_error:
                                     error_type = type(streaming_error).__name__
                                     error_msg = str(streaming_error) if str(streaming_error) else "(empty message)"
@@ -436,6 +452,11 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                         
                         await http_client.close()
                         logger.info(f"HTTP 200 - POST /v1/chat/completions (non-streaming) - completed")
+                        
+                        # Report credit usage
+                        credits = openai_response.get("usage", {}).get("credits_used")
+                        if credits:
+                            await account_manager.report_usage(account.id, credits)
                         
                         if debug_logger:
                             debug_logger.discard_buffers()

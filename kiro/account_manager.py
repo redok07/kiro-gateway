@@ -101,11 +101,13 @@ class AccountStats:
     """
     Statistics for account usage.
     
-    Tracks request counts for monitoring and future web UI.
+    Tracks request counts and cumulative credit consumption
+    for monitoring and future web UI.
     """
     total_requests: int = 0
     successful_requests: int = 0
     failed_requests: int = 0
+    credits_used: float = 0.0
 
 
 @dataclass
@@ -354,7 +356,8 @@ class AccountManager:
                     account.stats = AccountStats(
                         total_requests=stats_data.get("total_requests", 0),
                         successful_requests=stats_data.get("successful_requests", 0),
-                        failed_requests=stats_data.get("failed_requests", 0)
+                        failed_requests=stats_data.get("failed_requests", 0),
+                        credits_used=stats_data.get("credits_used", 0.0)
                     )
             
             logger.info(f"Loaded state: {len(self._model_to_accounts)} model mappings, {len(self._accounts)} accounts")
@@ -378,7 +381,8 @@ class AccountManager:
                     "stats": {
                         "total_requests": account.stats.total_requests,
                         "successful_requests": account.stats.successful_requests,
-                        "failed_requests": account.stats.failed_requests
+                        "failed_requests": account.stats.failed_requests,
+                        "credits_used": account.stats.credits_used
                     }
                 }
                 for account_id, account in self._accounts.items()
@@ -915,6 +919,27 @@ class AccountManager:
                         self._dirty = True
                 except ValueError:
                     pass
+    
+    async def report_usage(self, account_id: str, credits: float) -> None:
+        """
+        Report credit usage for an account (cumulative).
+        
+        Called after a response completes (streaming or non-streaming)
+        to track total credits consumed by this account.
+        
+        Args:
+            account_id: Account ID
+            credits: Credits consumed by the request
+        """
+        if not credits or credits <= 0:
+            return
+        
+        async with self._lock:
+            account = self._accounts.get(account_id)
+            if account:
+                account.stats.credits_used += credits
+                self._dirty = True
+                logger.debug(f"Account {account_id[:16]}... used {credits:.4f} credits (total: {account.stats.credits_used:.4f})")
     
     async def report_failure(
         self,

@@ -442,6 +442,8 @@ async def messages(
                     
                     if request_data.stream:
                         # Streaming mode
+                        usage_collector: dict = {}
+                        
                         async def stream_wrapper():
                             streaming_error = None
                             client_disconnected = False
@@ -461,6 +463,19 @@ async def messages(
                                     request_tools=tools_for_tokenizer,
                                     request_system=system_for_tokenizer,
                                 ):
+                                    # Capture credits from message_delta usage
+                                    if '"output_tokens"' in chunk and "message_delta" in chunk:
+                                        try:
+                                            # Anthropic SSE format: "event: message_delta\ndata: {...}\n\n"
+                                            for line in chunk.split("\n"):
+                                                if line.startswith("data: "):
+                                                    data_str = line[len("data: "):]
+                                                    chunk_json = json.loads(data_str)
+                                                    cu = chunk_json.get("usage", {}).get("credits_used")
+                                                    if cu:
+                                                        usage_collector["credits_used"] = cu
+                                        except (json.JSONDecodeError, ValueError, TypeError):
+                                            pass
                                     yield chunk
                             except GeneratorExit:
                                 client_disconnected = True
@@ -474,6 +489,10 @@ async def messages(
                                     pass
                             finally:
                                 await http_client.close()
+                                # Report credit usage from streaming
+                                credits = usage_collector.get("credits_used")
+                                if credits:
+                                    await account_manager.report_usage(account.id, credits)
                                 if streaming_error:
                                     error_type = type(streaming_error).__name__
                                     error_msg = str(streaming_error) if str(streaming_error) else "(empty message)"
@@ -512,6 +531,11 @@ async def messages(
                         
                         await http_client.close()
                         logger.info(f"HTTP 200 - POST /v1/messages (non-streaming) - completed")
+                        
+                        # Report credit usage
+                        credits = anthropic_response.get("usage", {}).get("credits_used")
+                        if credits:
+                            await account_manager.report_usage(account.id, credits)
                         
                         if debug_logger:
                             debug_logger.discard_buffers()

@@ -387,7 +387,7 @@ def show_account_menu() -> None:
 
 
 def _show_accounts_list(config_path: str) -> None:
-    """Read and display accounts from credentials.json with alias and status."""
+    """Read and display accounts from credentials.json with alias, status, and credits."""
     import json
     from pathlib import Path
 
@@ -414,6 +414,9 @@ def _show_accounts_list(config_path: str) -> None:
         print(f"  {RED}Error reading credentials.json: {e}{RESET}")
         return
 
+    # Load state.json for credits data
+    account_stats = _load_account_stats_from_state()
+
     print()
     print(f"  {WHITE}Accounts ({len(accounts)}):{RESET}")
 
@@ -439,8 +442,41 @@ def _show_accounts_list(config_path: str) -> None:
         # Check if credential file exists and token status
         status = _get_account_status(entry_path)
 
+        # Get credits from state
+        credits_str = ""
+        if entry_path and entry_path in account_stats:
+            credits = account_stats[entry_path].get("credits_used", 0.0)
+            if credits > 0:
+                credits_str = f"  {YELLOW}credits: {credits:.2f}{RESET}"
+
         print(f"    {CYAN}{i}.{RESET} {WHITE}{alias or 'unnamed'}{RESET}"
-              f"  {DIM}({entry_type}){RESET}  {status}")
+              f"  {DIM}({entry_type}){RESET}  {status}{credits_str}")
+
+
+def _load_account_stats_from_state() -> dict:
+    """
+    Load account stats from state.json for CLI display.
+    
+    Returns:
+        Dict mapping account_id to stats dict (with credits_used, etc.)
+    """
+    import json
+    from pathlib import Path
+    from kiro.config import ACCOUNTS_STATE_FILE
+
+    state_path = Path(ACCOUNTS_STATE_FILE)
+    if not state_path.exists():
+        return {}
+
+    try:
+        state_data = json.loads(state_path.read_text(encoding="utf-8"))
+        result = {}
+        for account_id, data in state_data.get("accounts", {}).items():
+            stats = data.get("stats", {})
+            result[account_id] = stats
+        return result
+    except Exception:
+        return {}
 
 
 def _get_account_status(file_path: str) -> str:
