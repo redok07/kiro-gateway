@@ -1,10 +1,7 @@
 name: Docker Build and Test
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  workflow_dispatch:  # Manual trigger only - auto-deploy disabled
 
 env:
   REGISTRY: ghcr.io
