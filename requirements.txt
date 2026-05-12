@@ -6,6 +6,12 @@ loguru
 python-dotenv
 tiktoken
 
+# Login tool dependencies (tools/kiro_login.py)
+camoufox[geoip]>=0.4.0
+browserforge>=1.2.0
+aiohttp>=3.9.0
+certifi>=2024.0.0
+
 # Testing dependencies
 pytest
 pytest-asyncio

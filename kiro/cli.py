@@ -363,7 +363,8 @@ def show_account_menu() -> None:
             print(f"  {DIM}{label}:{RESET}  {value}")
 
     print()
-    print(f"  {CYAN}L{RESET}  Login (Google OAuth via Camoufox)")
+    print(f"  {CYAN}L{RESET}  Login (single account - Google OAuth)")
+    print(f"  {CYAN}B{RESET}  Batch Login (multiple accounts from config)")
     print(f"  {CYAN}T{RESET}  Test connection")
     print(f"  {CYAN}0{RESET}  Back to main menu")
     print()
@@ -376,6 +377,9 @@ def show_account_menu() -> None:
     if choice == "l":
         print()
         run_login_flow()
+    elif choice == "b":
+        print()
+        run_batch_login_flow()
     elif choice == "t":
         print()
         test_connection()
@@ -638,6 +642,11 @@ def run_login_flow() -> None:
         print(f"  {DIM}Make sure tools/kiro_login.py exists in the project.{RESET}")
         return
 
+    # Pre-flight dependency check
+    if not _check_login_dependencies():
+        input(f"\n  {DIM}Press Enter to continue...{RESET}")
+        return
+
     # Get email
     try:
         email = input(f"  Google email: ").strip()
@@ -720,6 +729,150 @@ def run_login_flow() -> None:
 
     print()
     input(f"  {DIM}Press Enter to continue...{RESET}")
+
+
+def run_batch_login_flow() -> None:
+    """
+    Batch login via kiro_login.py (multiple accounts from accounts.json).
+
+    Wraps tools/kiro_login.py batch command which handles:
+    - Loading accounts from a JSON config file
+    - Sequential login with cooldown between accounts
+    - Auto-registration in credentials.json for multi-account system
+    - Retry with exponential backoff per account
+    """
+    from kiro.config import ACCOUNTS_CONFIG_FILE
+
+    print(f"  {WHITE}{BOLD}Batch Login (Multiple Accounts){RESET}")
+    print()
+    print(f"  {DIM}Logs in multiple accounts sequentially from a config file.{RESET}")
+    print(f"  {DIM}Each account needs: email, password (in env or prompted).{RESET}")
+    print()
+
+    # Check login script exists
+    login_script = GATEWAY_ROOT / "tools" / "kiro_login.py"
+    if not login_script.exists():
+        print(f"  {RED}Login script not found: {login_script}{RESET}")
+        print(f"  {DIM}Make sure tools/kiro_login.py exists in the project.{RESET}")
+        input(f"\n  {DIM}Press Enter to continue...{RESET}")
+        return
+
+    # Pre-flight dependency check
+    if not _check_login_dependencies():
+        input(f"\n  {DIM}Press Enter to continue...{RESET}")
+        return
+
+    # Config file path
+    default_config = GATEWAY_ROOT / "accounts.json"
+    print(f"  {DIM}Config file format (accounts.json):{RESET}")
+    print(f"  {DIM}[{RESET}")
+    print(f'  {DIM}  {{"email": "user@gmail.com", "password": "...", "enabled": true}}{RESET}')
+    print(f"  {DIM}]{RESET}")
+    print()
+
+    config_hint = str(default_config) if default_config.exists() else "accounts.json"
+    try:
+        config_path = input(f"  Config file [{config_hint}]: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        return
+    if not config_path:
+        config_path = config_hint
+
+    config_file = Path(config_path)
+    if not config_file.is_absolute():
+        config_file = GATEWAY_ROOT / config_file
+
+    if not config_file.exists():
+        print(f"  {RED}Config file not found: {config_file}{RESET}")
+        print(f"  {DIM}Create it with the format shown above.{RESET}")
+        input(f"\n  {DIM}Press Enter to continue...{RESET}")
+        return
+
+    # Headless mode
+    print()
+    print(f"  {DIM}Options:{RESET}")
+    print(f"  {CYAN}1{RESET}  Headless (default, faster)")
+    print(f"  {CYAN}2{RESET}  Visible browser (for captcha/2FA)")
+    print()
+    try:
+        mode_choice = input(f"  Mode [1]: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        return
+    headless = mode_choice != "2"
+
+    print()
+    print(f"  {DIM}Starting batch login from {config_file.name}...{RESET}")
+    print(f"  {DIM}Mode: {'headless' if headless else 'visible browser'}{RESET}")
+    print()
+
+    # Build command
+    cmd = [
+        sys.executable, str(login_script),
+        "batch",
+        "--config", str(config_file),
+        "--register",
+    ]
+    if not headless:
+        cmd.append("--no-headless")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(GATEWAY_ROOT),
+            capture_output=False,
+            text=True,
+        )
+        if result.returncode == 0:
+            print()
+            print(f"  {GREEN}{BOLD}Batch login completed successfully!{RESET}")
+            print(f"  {DIM}All accounts registered in credentials.json.{RESET}")
+        else:
+            print()
+            print(f"  {RED}Batch login finished with errors (exit code: {result.returncode}){RESET}")
+            if result.returncode == 2:
+                print(f"  {DIM}Config file error. Check accounts.json format.{RESET}")
+    except FileNotFoundError:
+        print(f"  {RED}Python executable not found: {sys.executable}{RESET}")
+    except Exception as e:
+        print(f"  {RED}Error running batch login: {e}{RESET}")
+
+    print()
+    input(f"  {DIM}Press Enter to continue...{RESET}")
+
+
+def _check_login_dependencies() -> bool:
+    """
+    Pre-flight check for login tool dependencies.
+
+    Returns:
+        True if all dependencies are available, False otherwise.
+    """
+    missing = []
+    try:
+        import importlib
+        importlib.import_module("camoufox")
+    except ImportError:
+        missing.append("camoufox[geoip]")
+    try:
+        import importlib
+        importlib.import_module("browserforge")
+    except ImportError:
+        missing.append("browserforge")
+    try:
+        import importlib
+        importlib.import_module("aiohttp")
+    except ImportError:
+        missing.append("aiohttp")
+
+    if missing:
+        print(f"  {RED}Missing dependencies: {', '.join(missing)}{RESET}")
+        print()
+        print(f"  {DIM}Install with:{RESET}")
+        print(f"  {CYAN}  pip install {' '.join(missing)}{RESET}")
+        print(f"  {DIM}Or:{RESET}")
+        print(f"  {CYAN}  pip install -r requirements.txt{RESET}")
+        return False
+    return True
 
 
 def uninstall_gateway() -> None:
