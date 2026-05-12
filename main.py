@@ -525,6 +525,9 @@ async def lifespan(app: FastAPI):
     # Save initial state
     await app.state.account_manager._save_state()
     
+    # Warmup remaining accounts in parallel (first one already initialized above)
+    await app.state.account_manager.warmup_all_accounts()
+    
     # Start background task for periodic state saving
     save_task = asyncio.create_task(
         app.state.account_manager.save_state_periodically()

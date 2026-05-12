@@ -383,6 +383,9 @@ class TestLifespanAccountManagerInit:
             async def _save_state(self):
                 pass
             
+            async def warmup_all_accounts(self):
+                pass
+            
             async def save_state_periodically(self):
                 await asyncio.sleep(1000)
             

@@ -181,10 +181,28 @@ class AccountManager:
         self._accounts: Dict[str, Account] = {}
         self._model_to_accounts: Dict[str, ModelAccountList] = {}
         self._lock = asyncio.Lock()
+        self._account_locks: Dict[str, asyncio.Lock] = {}
         self._dirty = False
         self._credentials_config: List[Dict] = []
         self._current_account_index: int = 0  # GLOBAL sticky index for all models
         self._refresh_task: Optional[asyncio.Task] = None
+    
+    def _get_account_lock(self, account_id: str) -> asyncio.Lock:
+        """
+        Get or create per-account lock for init/refresh operations.
+        
+        Each account gets its own lock so that network I/O for one account
+        doesn't block operations on other accounts.
+        
+        Args:
+            account_id: Account ID to get lock for
+        
+        Returns:
+            asyncio.Lock for the specified account
+        """
+        if account_id not in self._account_locks:
+            self._account_locks[account_id] = asyncio.Lock()
+        return self._account_locks[account_id]
     
     async def load_credentials(self) -> None:
         """
@@ -435,8 +453,10 @@ class AccountManager:
 
                 for account_id, account in accounts_snapshot:
                     try:
-                        # force_refresh() has its own per-instance lock — safe without self._lock
-                        await account.auth_manager.force_refresh()
+                        # Use per-account lock to avoid racing with get_next_account()
+                        account_lock = self._get_account_lock(account_id)
+                        async with account_lock:
+                            await account.auth_manager.force_refresh()
                         refreshed += 1
 
                         # Auto-recovery: if account was dead, reset circuit breaker
@@ -488,6 +508,42 @@ class AccountManager:
             pass
         self._refresh_task = None
         logger.info("Background token refresh stopped")
+    
+    async def warmup_all_accounts(self) -> None:
+        """
+        Initialize all accounts in parallel at startup.
+        
+        Reduces first-request latency by pre-fetching tokens and model lists
+        for all accounts concurrently. Failures are logged but don't prevent startup.
+        """
+        account_ids = list(self._accounts.keys())
+        if not account_ids:
+            return
+        
+        logger.info(f"Warming up {len(account_ids)} accounts in parallel...")
+        
+        async def _warmup_single(account_id: str) -> bool:
+            """Warmup a single account."""
+            account_lock = self._get_account_lock(account_id)
+            async with account_lock:
+                try:
+                    success = await self._initialize_account(account_id)
+                    if success:
+                        logger.info(f"Account warmed up: {account_id}")
+                    else:
+                        logger.warning(f"Failed to warmup account: {account_id}")
+                    return success
+                except Exception as e:
+                    logger.warning(f"Error warming up account {account_id}: {e}")
+                    return False
+        
+        results = await asyncio.gather(
+            *[_warmup_single(aid) for aid in account_ids],
+            return_exceptions=True
+        )
+        
+        success_count = sum(1 for r in results if r is True)
+        logger.info(f"Warmup complete: {success_count}/{len(account_ids)} accounts ready")
     
     async def _initialize_account(self, account_id: str) -> bool:
         """
@@ -738,25 +794,25 @@ class AccountManager:
                 # Always return single account (ignore cooldown/failures)
                 return account
             
-            # Multi-account logic: GLOBAL sticky
+            # Multi-account: snapshot state for lock-free iteration
             normalized_model = normalize_model_name(model)
-            
-            # ALWAYS start from GLOBAL index (one current account for ALL models)
             start_index = self._current_account_index
-            
-            # ALWAYS iterate over ALL accounts
             all_account_ids = list(self._accounts.keys())
+        
+        # Outside _lock: try each candidate with per-account locks for I/O
+        for i in range(len(all_account_ids)):
+            current_index = (start_index + i) % len(all_account_ids)
+            account_id = all_account_ids[current_index]
             
-            for i in range(len(all_account_ids)):
-                current_index = (start_index + i) % len(all_account_ids)
-                account_id = all_account_ids[current_index]
-                account = self._accounts[account_id]
-                
-                # Skip accounts already tried in current failover loop
+            # Quick state check under _lock
+            async with self._lock:
+                account = self._accounts.get(account_id)
+                if not account:
+                    continue
                 if exclude_accounts and account_id in exclude_accounts:
                     continue
                 
-                # Check Circuit Breaker (Half-Open state with exponential backoff)
+                # Circuit Breaker check (fast, no I/O)
                 if account.failures > 0:
                     time_since_failure = time.time() - account.last_failure_time
                     
@@ -775,27 +831,46 @@ class AccountManager:
                         # Half-Open: recovery timeout passed
                         logger.info(f"Half-Open state for {account_id} (recovery timeout passed, effective={effective_timeout}s)")
                 
-                # Lazy initialization
-                if account.auth_manager is None:
-                    success = await self._initialize_account(account_id)
-                    if not success:
-                        account.failures += 1
-                        self._dirty = True
-                        continue
-                
-                # Check TTL and refresh if needed
-                if account.models_cached_at > 0:
-                    age = time.time() - account.models_cached_at
-                    if age > ACCOUNT_CACHE_TTL:
+                needs_init = account.auth_manager is None
+                needs_refresh = (account.models_cached_at > 0 and
+                               (time.time() - account.models_cached_at) > ACCOUNT_CACHE_TTL)
+            
+            # Network I/O under PER-ACCOUNT lock (doesn't block other accounts)
+            if needs_init or needs_refresh:
+                account_lock = self._get_account_lock(account_id)
+                async with account_lock:
+                    # Double-check after acquiring lock (another request may have already done it)
+                    async with self._lock:
+                        account = self._accounts[account_id]
+                        needs_init = account.auth_manager is None
+                        needs_refresh = (account.models_cached_at > 0 and
+                                       (time.time() - account.models_cached_at) > ACCOUNT_CACHE_TTL)
+                    
+                    if needs_init:
+                        success = await self._initialize_account(account_id)
+                        if not success:
+                            async with self._lock:
+                                account.failures += 1
+                                self._dirty = True
+                            continue
+                    
+                    if needs_refresh:
                         try:
                             await self._refresh_account_models(account_id)
                         except Exception as e:
                             logger.warning(f"Failed to refresh models for {account_id}: {e}")
+            
+            # Final validation under _lock
+            async with self._lock:
+                account = self._accounts.get(account_id)
+                if not account or account.auth_manager is None:
+                    continue
                 
                 # Check if model is available on this account
-                available_models = account.model_resolver.get_available_models()
-                if normalized_model not in available_models:
-                    continue
+                if account.model_resolver:
+                    available_models = account.model_resolver.get_available_models()
+                    if normalized_model not in available_models:
+                        continue
                 
                 # Account is suitable!
                 # Round-robin: advance index for next call
@@ -803,9 +878,9 @@ class AccountManager:
                     self._current_account_index = (current_index + 1) % len(all_account_ids)
                     self._dirty = True
                 return account
-            
-            # All accounts unavailable
-            return None
+        
+        # All accounts unavailable
+        return None
     
     async def report_success(self, account_id: str, model: str) -> None:
         """
