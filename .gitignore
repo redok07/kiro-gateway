@@ -52,7 +52,12 @@ debug*.json
 _notes/
 requests/
 
+# Tools - sensitive files
+tools/accounts.json
+tools/venv/
+
 # Testing
 .pytest_cache/
 .coverage
 htmlcov/
+.sisyphus

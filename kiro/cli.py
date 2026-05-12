@@ -412,8 +412,15 @@ def _add_to_user_path_unix(bin_dir: str) -> None:
         print(f"  {DIM}Add this to your PATH manually: {bin_dir}{RESET}")
 
 
+def clear_screen() -> None:
+    """Clear terminal screen."""
+    os.system("cls" if sys.platform == "win32" else "clear")
+
+
 def print_menu() -> None:
-    """Print the main interactive menu."""
+    """Clear screen and print the main interactive menu."""
+    clear_screen()
+
     pid = get_server_pid()
     status = f"{GREEN}RUNNING{RESET}" if pid else f"{DIM}STOPPED{RESET}"
 
@@ -453,6 +460,9 @@ def run_cli() -> None:
             print()
             break
 
+        if choice == "0":
+            break
+
         print()
 
         if choice == "1":
@@ -469,7 +479,10 @@ def run_cli() -> None:
             show_account_menu()
         elif choice == "7":
             setup_path()
-        elif choice == "0":
-            break
         else:
             print(f"  {DIM}Invalid choice.{RESET}")
+
+        # Pause so user can read the output before screen clears
+        if choice != "6":  # Account menu already has its own "Press Enter"
+            print()
+            input(f"  {DIM}Press Enter to continue...{RESET}")
