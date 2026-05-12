@@ -333,15 +333,13 @@ async def lifespan(app: FastAPI):
     """
     logger.info("Starting application... Creating state managers.")
     
-    # Create shared HTTP client with connection pooling
+    # Create shared HTTP client with connection pooling for non-streaming requests
     # This reduces memory usage and enables connection reuse across requests
-    # Limits: max 100 total connections, max 20 keep-alive connections
     limits = httpx.Limits(
         max_connections=100,
         max_keepalive_connections=20,
         keepalive_expiry=30.0  # Close idle connections after 30 seconds
     )
-    # Timeout configuration for streaming (long read timeout for model "thinking")
     timeout = httpx.Timeout(
         connect=30.0,
         read=STREAMING_READ_TIMEOUT,  # 300 seconds for streaming
@@ -351,9 +349,34 @@ async def lifespan(app: FastAPI):
     app.state.http_client = httpx.AsyncClient(
         limits=limits,
         timeout=timeout,
-        follow_redirects=True
+        follow_redirects=True,
+        http2=True,
     )
-    logger.info("Shared HTTP client created with connection pooling")
+    
+    # Dedicated streaming connection pool
+    # Separate pool prevents long-lived streaming connections from starving short requests
+    streaming_limits = httpx.Limits(
+        max_connections=50,
+        max_keepalive_connections=10,
+        keepalive_expiry=60.0  # Longer keepalive for streaming reuse
+    )
+    streaming_timeout = httpx.Timeout(
+        connect=30.0,
+        read=STREAMING_READ_TIMEOUT,  # 300 seconds for model "thinking" between chunks
+        write=30.0,
+        pool=10.0  # Shorter pool wait - fail fast if pool exhausted
+    )
+    app.state.streaming_http_client = httpx.AsyncClient(
+        limits=streaming_limits,
+        timeout=streaming_timeout,
+        follow_redirects=True,
+        http2=True,
+    )
+    logger.info("HTTP clients created: shared pool (100 conn, HTTP/2) + streaming pool (50 conn, HTTP/2)")
+    
+    # Pre-load tiktoken encoding at startup to avoid blocking event loop on first request
+    from kiro.tokenizer import _get_encoding
+    _get_encoding()
     
     # ==============================================================================
     # Legacy Fallback: .env → credentials.json
@@ -525,12 +548,13 @@ async def lifespan(app: FastAPI):
     await app.state.account_manager._save_state()
     logger.info("Final state saved")
     
-    # Close HTTP client
+    # Close HTTP clients
     try:
         await app.state.http_client.aclose()
-        logger.info("Shared HTTP client closed")
+        await app.state.streaming_http_client.aclose()
+        logger.info("HTTP clients closed")
     except Exception as e:
-        logger.warning(f"Error closing shared HTTP client: {e}")
+        logger.warning(f"Error closing HTTP clients: {e}")
 
 
 # --- FastAPI Application ---

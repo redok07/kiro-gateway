@@ -335,20 +335,21 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
             
-            # Log Kiro payload
-            try:
-                kiro_request_body = json.dumps(kiro_payload, ensure_ascii=False, indent=2).encode('utf-8')
-                if debug_logger:
+            # Log Kiro payload (only serialize when debug logging is active)
+            if debug_logger:
+                try:
+                    kiro_request_body = json.dumps(kiro_payload, ensure_ascii=False, indent=2).encode('utf-8')
                     debug_logger.log_kiro_request_body(kiro_request_body)
-            except Exception as e:
-                logger.warning(f"Failed to log Kiro request: {e}")
+                except Exception as e:
+                    logger.warning(f"Failed to log Kiro request: {e}")
             
             # Create HTTP client
             url = f"{auth_manager.api_host}/generateAssistantResponse"
             logger.debug(f"Kiro API URL: {url} (account: {account.id})")
             
             if request_data.stream:
-                http_client = KiroHttpClient(auth_manager, shared_client=None)
+                streaming_client = request.app.state.streaming_http_client
+                http_client = KiroHttpClient(auth_manager, shared_client=streaming_client)
             else:
                 shared_client = request.app.state.http_client
                 http_client = KiroHttpClient(auth_manager, shared_client=shared_client)
@@ -366,9 +367,10 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                     # SUCCESS - report and return
                     await account_manager.report_success(account.id, request_data.model)
                     
-                    # Prepare data for token counting
-                    messages_for_tokenizer = [msg.model_dump() for msg in request_data.messages]
-                    tools_for_tokenizer = [tool.model_dump() for tool in request_data.tools] if request_data.tools else None
+                    # Pass raw Pydantic objects for lazy token counting
+                    # model_dump() is deferred to only when context_usage fallback is needed
+                    request_messages_raw = request_data.messages
+                    request_tools_raw = request_data.tools
                     
                     if request_data.stream:
                         # Streaming mode
@@ -388,8 +390,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                                     model_cache=model_cache,
                                     auth_manager=auth_manager,
                                     initial_response=response,
-                                    request_messages=messages_for_tokenizer,
-                                    request_tools=tools_for_tokenizer
+                                    request_messages=request_messages_raw,
+                                    request_tools=request_tools_raw
                                 ):
                                     yield chunk
                             except GeneratorExit:
@@ -428,8 +430,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                             request_data.model,
                             model_cache,
                             auth_manager,
-                            request_messages=messages_for_tokenizer,
-                            request_tools=tools_for_tokenizer
+                            request_messages=request_messages_raw,
+                            request_tools=request_tools_raw
                         )
                         
                         await http_client.close()

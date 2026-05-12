@@ -163,8 +163,8 @@ async def stream_kiro_to_anthropic(
     message_id = generate_message_id()
     input_tokens = 0
     output_tokens = 0
-    full_content = ""
-    full_thinking_content = ""
+    content_parts: list = []
+    thinking_parts: list = []
     
     # NOTE: Anthropic streaming spec requires input_tokens in message_start (beginning),
     # but Kiro API provides accurate context_usage at the end of stream.
@@ -223,7 +223,7 @@ async def stream_kiro_to_anthropic(
         async for event in parse_kiro_stream(response, first_token_timeout):
             if event.type == "content":
                 content = event.content or ""
-                full_content += content
+                content_parts.append(content)
                 
                 # Close thinking block if it was open and we're now getting regular content
                 if thinking_block_started and thinking_block_index is not None:
@@ -260,7 +260,7 @@ async def stream_kiro_to_anthropic(
             
             elif event.type == "thinking":
                 thinking_content = event.thinking_content or ""
-                full_thinking_content += thinking_content
+                thinking_parts.append(thinking_content)
                 
                 # Handle thinking content based on mode
                 if FAKE_REASONING_HANDLING == "as_reasoning_content":
@@ -525,6 +525,10 @@ async def stream_kiro_to_anthropic(
         
         # Track completion signals for truncation detection
         stream_completed_normally = context_usage_percentage is not None
+        
+        # Join accumulated content (O(n) vs O(n^2) from repeated +=)
+        full_content = "".join(content_parts)
+        full_thinking_content = "".join(thinking_parts)
         
         # Check for bracket-style tool calls in full content
         bracket_tool_calls = parse_bracket_tool_calls(full_content)

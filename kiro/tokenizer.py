@@ -107,6 +107,13 @@ def count_tokens(text: str, apply_claude_correction: bool = True) -> int:
     return base_estimate
 
 
+def _to_dict(item) -> dict:
+    """Convert a Pydantic model or dict to dict for token counting."""
+    if hasattr(item, "model_dump"):
+        return item.model_dump()
+    return item
+
+
 def count_message_tokens(messages: List[Dict[str, Any]], apply_claude_correction: bool = True) -> int:
     """
     Counts tokens in a list of chat messages.
@@ -117,7 +124,7 @@ def count_message_tokens(messages: List[Dict[str, Any]], apply_claude_correction
     - Service tokens between messages: ~3-4 tokens
     
     Args:
-        messages: List of messages in OpenAI format
+        messages: List of messages in OpenAI format (dicts or Pydantic models)
         apply_claude_correction: Apply correction coefficient for Claude
     
     Returns:
@@ -128,7 +135,8 @@ def count_message_tokens(messages: List[Dict[str, Any]], apply_claude_correction
     
     total_tokens = 0
     
-    for message in messages:
+    for raw_message in messages:
+        message = _to_dict(raw_message)
         # Base tokens per message (role, delimiters)
         total_tokens += 4  # ~4 tokens for service information
         
@@ -215,7 +223,7 @@ def count_tools_tokens(tools: Optional[List[Dict[str, Any]]], apply_claude_corre
     Counts tokens in tool definitions.
     
     Args:
-        tools: List of tools in OpenAI format
+        tools: List of tools in OpenAI format (dicts or Pydantic models)
         apply_claude_correction: Apply correction coefficient for Claude
     
     Returns:
@@ -226,7 +234,8 @@ def count_tools_tokens(tools: Optional[List[Dict[str, Any]]], apply_claude_corre
     
     total_tokens = 0
     
-    for tool in tools:
+    for raw_tool in tools:
+        tool = _to_dict(raw_tool)
         total_tokens += 4  # Service tokens
 
         # Support both OpenAI standard tools and Anthropic/OpenAI flat tools

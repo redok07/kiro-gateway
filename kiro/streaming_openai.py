@@ -120,8 +120,8 @@ async def stream_kiro_to_openai_internal(
     
     metering_data = None
     context_usage_percentage = None
-    full_content = ""
-    full_thinking_content = ""  # Accumulated thinking content for non-streaming
+    content_parts: list = []
+    thinking_parts: list = []
     
     streaming_error_occurred = False
     tool_calls_from_stream = []
@@ -132,7 +132,7 @@ async def stream_kiro_to_openai_internal(
         async for event in parse_kiro_stream(response, first_token_timeout):
             if event.type == "content" and event.content:
                 # Accumulate content for bracket tool call detection
-                full_content += event.content
+                content_parts.append(event.content)
                 
                 # Format as OpenAI chunk
                 delta = {"content": event.content}
@@ -157,7 +157,7 @@ async def stream_kiro_to_openai_internal(
             
             elif event.type == "thinking" and event.thinking_content:
                 # Accumulate thinking content
-                full_thinking_content += event.thinking_content
+                thinking_parts.append(event.thinking_content)
                 
                 # Send as reasoning_content or content based on mode
                 if FAKE_REASONING_HANDLING == "as_reasoning_content":
@@ -254,7 +254,7 @@ async def stream_kiro_to_openai_internal(
                                 yield chunk_text
                             
                             # Accumulate for token counting
-                            full_content += summary
+                            content_parts.append(summary)
                             
                             # Skip normal tool_use processing
                             continue
@@ -272,6 +272,10 @@ async def stream_kiro_to_openai_internal(
         received_usage = metering_data is not None
         received_context_usage = context_usage_percentage is not None
         stream_completed_normally = received_usage or received_context_usage
+        
+        # Join accumulated content (O(n) vs O(n^2) from repeated +=)
+        full_content = "".join(content_parts)
+        full_thinking_content = "".join(thinking_parts)
         
         # Check bracket-style tool calls in full content
         bracket_tool_calls = parse_bracket_tool_calls(full_content)

@@ -731,11 +731,11 @@ class KiroAuthManager:
         
         logger.info(f"Token refreshed via Kiro Desktop Auth, expires: {self._expires_at.isoformat()}")
         
-        # Save to file or SQLite depending on configuration
+        # Save to file or SQLite depending on configuration (offload to thread to avoid blocking)
         if self._sqlite_db:
-            self._save_credentials_to_sqlite()
+            await asyncio.to_thread(self._save_credentials_to_sqlite)
         else:
-            self._save_credentials_to_file()
+            await asyncio.to_thread(self._save_credentials_to_file)
     
     async def _refresh_token_aws_sso_oidc(self) -> None:
         """
@@ -766,7 +766,7 @@ class KiroAuthManager:
             # 400 = invalid_request, likely stale token after kiro-cli re-login
             if e.response.status_code == 400 and self._sqlite_db:
                 logger.warning("Token refresh failed with 400, reloading credentials from SQLite and retrying...")
-                self._load_credentials_from_sqlite(self._sqlite_db)
+                await asyncio.to_thread(self._load_credentials_from_sqlite, self._sqlite_db)
                 await self._do_aws_sso_oidc_refresh()
             else:
                 raise
@@ -858,11 +858,11 @@ class KiroAuthManager:
         
         logger.info(f"Token refreshed via AWS SSO OIDC, expires: {self._expires_at.isoformat()}")
         
-        # Save to file or SQLite depending on configuration
+        # Save to file or SQLite depending on configuration (offload to thread to avoid blocking)
         if self._sqlite_db:
-            self._save_credentials_to_sqlite()
+            await asyncio.to_thread(self._save_credentials_to_sqlite)
         else:
-            self._save_credentials_to_file()
+            await asyncio.to_thread(self._save_credentials_to_file)
     
     async def get_access_token(self) -> str:
         """
@@ -890,7 +890,7 @@ class KiroAuthManager:
             # SQLite mode: reload credentials first, kiro-cli might have updated them
             if self._sqlite_db and self.is_token_expiring_soon():
                 logger.debug("SQLite mode: reloading credentials before refresh attempt")
-                self._load_credentials_from_sqlite(self._sqlite_db)
+                await asyncio.to_thread(self._load_credentials_from_sqlite, self._sqlite_db)
                 # Check if reloaded token is now valid
                 if self._access_token and not self.is_token_expiring_soon():
                     logger.debug("SQLite reload provided fresh token, no refresh needed")

@@ -399,29 +399,31 @@ async def messages(
                     }
                 )
             
-            # Log Kiro payload
-            try:
-                kiro_request_body = json.dumps(kiro_payload, ensure_ascii=False, indent=2).encode('utf-8')
-                if debug_logger:
+            # Log Kiro payload (only serialize when debug logging is active)
+            if debug_logger:
+                try:
+                    kiro_request_body = json.dumps(kiro_payload, ensure_ascii=False, indent=2).encode('utf-8')
                     debug_logger.log_kiro_request_body(kiro_request_body)
-            except Exception as e:
-                logger.warning(f"Failed to log Kiro request: {e}")
+                except Exception as e:
+                    logger.warning(f"Failed to log Kiro request: {e}")
             
             # Create HTTP client
             url = f"{auth_manager.api_host}/generateAssistantResponse"
             logger.debug(f"Kiro API URL: {url} (account: {account.id})")
             
             if request_data.stream:
-                http_client = KiroHttpClient(auth_manager, shared_client=None)
+                streaming_client = request.app.state.streaming_http_client
+                http_client = KiroHttpClient(auth_manager, shared_client=streaming_client)
             else:
                 shared_client = request.app.state.http_client
                 http_client = KiroHttpClient(auth_manager, shared_client=shared_client)
             
-            # Prepare data for token counting
-            messages_for_tokenizer = [msg.model_dump() for msg in request_data.messages]
-            tools_for_tokenizer = [tool.model_dump() for tool in request_data.tools] if request_data.tools else None
+            # Pass raw Pydantic objects for lazy token counting
+            # model_dump() is deferred to only when context_usage fallback is needed
+            messages_for_tokenizer = request_data.messages
+            tools_for_tokenizer = request_data.tools
             if isinstance(request_data.system, list):
-                system_for_tokenizer = [b.model_dump() if hasattr(b, "model_dump") else b for b in request_data.system]
+                system_for_tokenizer = request_data.system
             else:
                 system_for_tokenizer = request_data.system
             

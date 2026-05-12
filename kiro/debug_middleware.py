@@ -18,10 +18,13 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 """
-Debug logging middleware for Kiro Gateway.
+Debug logging middleware for Kiro Gateway (pure ASGI implementation).
 
 This middleware initializes debug logging BEFORE Pydantic validation,
 which allows capturing validation errors (422) in debug logs.
+
+Uses a pure ASGI middleware instead of Starlette's BaseHTTPMiddleware to avoid
+response body buffering that breaks true streaming and adds latency.
 
 The middleware:
 1. Intercepts requests to API endpoints (/v1/chat/completions, /v1/messages)
@@ -34,9 +37,7 @@ Flush/discard operations are handled by:
 - Exception handlers (for validation errors and other exceptions)
 """
 
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import Response
+from starlette.types import ASGIApp, Receive, Scope, Send
 from loguru import logger
 
 from kiro.config import DEBUG_MODE
@@ -50,12 +51,15 @@ LOGGED_ENDPOINTS = frozenset({
 })
 
 
-class DebugLoggerMiddleware(BaseHTTPMiddleware):
+class DebugLoggerMiddleware:
     """
-    Middleware for initializing debug logging on API requests.
+    Pure ASGI middleware for initializing debug logging on API requests.
     
     This middleware runs BEFORE Pydantic validation, which means it can
     capture the raw request body even for requests that fail validation.
+    
+    Unlike BaseHTTPMiddleware, this does NOT buffer the response body,
+    preserving true streaming behavior and reducing latency.
     
     The middleware only activates for API endpoints defined in LOGGED_ENDPOINTS.
     Health checks, documentation, and other endpoints are not logged.
@@ -67,50 +71,65 @@ class DebugLoggerMiddleware(BaseHTTPMiddleware):
     - flush_on_error() / discard_buffers(): Called in routes or exception handlers
     """
     
-    async def dispatch(self, request: Request, call_next) -> Response:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+    
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """
-        Process the request and initialize debug logging if needed.
+        ASGI interface. Only intercepts HTTP requests to logged endpoints.
         
         Args:
-            request: The incoming HTTP request
-            call_next: The next middleware or route handler
-            
-        Returns:
-            The response from the next handler
+            scope: ASGI connection scope
+            receive: ASGI receive callable
+            send: ASGI send callable
         """
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        
+        path = scope.get("path", "")
+        
         # Skip logging for non-API endpoints (health, docs, etc.)
-        if request.url.path not in LOGGED_ENDPOINTS:
-            return await call_next(request)
+        if path not in LOGGED_ENDPOINTS:
+            await self.app(scope, receive, send)
+            return
         
         # Skip if debug mode is disabled
         if DEBUG_MODE == "off":
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
         
         # Import here to avoid circular imports and allow graceful degradation
         try:
             from kiro.debug_logger import debug_logger
         except ImportError:
             logger.warning("debug_logger not available, skipping debug logging")
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
         
         # Initialize debug logging for this request
-        # This sets up buffers and creates a loguru sink to capture app logs
         debug_logger.prepare_new_request()
         
-        # Read and log the raw request body
-        # FastAPI caches the body after first read, so this is safe
-        try:
-            body = await request.body()
-            if body:
-                debug_logger.log_request_body(body)
-        except Exception as e:
-            logger.warning(f"Failed to read request body for debug logging: {e}")
+        # Intercept the request body for logging without consuming it
+        body_chunks: list[bytes] = []
+        body_complete = False
         
-        # Continue to validation and route handler
-        # flush_on_error() or discard_buffers() will be called by:
-        # - Route handlers (for successful requests and Kiro API errors)
-        # - validation_exception_handler (for 422 validation errors)
-        # - Generic exception handlers (for other errors)
-        response = await call_next(request)
+        async def receive_wrapper() -> dict:
+            nonlocal body_complete
+            message = await receive()
+            if message["type"] == "http.request":
+                body = message.get("body", b"")
+                if body:
+                    body_chunks.append(body)
+                if not message.get("more_body", False):
+                    body_complete = True
+                    # Log the complete request body
+                    full_body = b"".join(body_chunks)
+                    if full_body:
+                        try:
+                            debug_logger.log_request_body(full_body)
+                        except Exception as e:
+                            logger.warning(f"Failed to log request body: {e}")
+            return message
         
-        return response
+        await self.app(scope, receive_wrapper, send)
