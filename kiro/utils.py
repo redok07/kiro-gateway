@@ -35,15 +35,8 @@ if TYPE_CHECKING:
     from kiro.auth import KiroAuthManager
 
 
-def get_machine_fingerprint() -> str:
-    """
-    Generates a unique machine fingerprint based on hostname and username.
-    
-    Used for User-Agent formation to identify a specific gateway installation.
-    
-    Returns:
-        SHA256 hash of the string "{hostname}-{username}-kiro-gateway"
-    """
+def _compute_machine_fingerprint() -> str:
+    """Compute machine fingerprint once at module load."""
     try:
         import socket
         import getpass
@@ -58,14 +51,29 @@ def get_machine_fingerprint() -> str:
         return hashlib.sha256(b"default-kiro-gateway").hexdigest()
 
 
+# Cached at module load - never changes during process lifetime
+_MACHINE_FINGERPRINT: str = _compute_machine_fingerprint()
+
+
+def get_machine_fingerprint() -> str:
+    """
+    Returns the cached machine fingerprint.
+    
+    Used for User-Agent formation to identify a specific gateway installation.
+    Computed once at module load and cached for the process lifetime.
+    
+    Returns:
+        SHA256 hash of the string "{hostname}-{username}-kiro-gateway"
+    """
+    return _MACHINE_FINGERPRINT
+
+
 def get_kiro_headers(auth_manager: "KiroAuthManager", token: str) -> dict:
     """
     Builds headers for Kiro API requests.
     
-    Includes all necessary headers for authentication and identification:
-    - Authorization with Bearer token
-    - User-Agent with fingerprint
-    - AWS CodeWhisperer specific headers
+    Uses a cached base template per auth_manager (fingerprint is stable)
+    and only varies the Authorization and invocation-id per request.
     
     Args:
         auth_manager: Authentication manager for obtaining fingerprint
@@ -74,18 +82,24 @@ def get_kiro_headers(auth_manager: "KiroAuthManager", token: str) -> dict:
     Returns:
         Dictionary with headers for HTTP request
     """
-    fingerprint = auth_manager.fingerprint
+    base = auth_manager._cached_headers
+    if base is None:
+        fingerprint = auth_manager.fingerprint
+        base = {
+            "Content-Type": "application/json",
+            "User-Agent": f"aws-sdk-js/1.0.27 ua/2.1 os/win32#10.0.19044 lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E KiroIDE-0.7.45-{fingerprint}",
+            "x-amz-user-agent": f"aws-sdk-js/1.0.27 KiroIDE-0.7.45-{fingerprint}",
+            "x-amzn-codewhisperer-optout": "true",
+            "x-amzn-kiro-agent-mode": "vibe",
+            "amz-sdk-request": "attempt=1; max=3",
+        }
+        auth_manager._cached_headers = base
     
-    return {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "User-Agent": f"aws-sdk-js/1.0.27 ua/2.1 os/win32#10.0.19044 lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E KiroIDE-0.7.45-{fingerprint}",
-        "x-amz-user-agent": f"aws-sdk-js/1.0.27 KiroIDE-0.7.45-{fingerprint}",
-        "x-amzn-codewhisperer-optout": "true",
-        "x-amzn-kiro-agent-mode": "vibe",
-        "amz-sdk-invocation-id": str(uuid.uuid4()),
-        "amz-sdk-request": "attempt=1; max=3",
-    }
+    # Per-request fields: shallow copy + override dynamic keys
+    headers = base.copy()
+    headers["Authorization"] = f"Bearer {token}"
+    headers["amz-sdk-invocation-id"] = str(uuid.uuid4())
+    return headers
 
 
 def generate_completion_id() -> str:

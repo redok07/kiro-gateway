@@ -124,6 +124,9 @@ def trim_payload_to_limit(payload: Dict[str, Any], max_bytes: int) -> PayloadTri
 
     Trims in user/assistant pairs (2 entries at a time), aligns start to
     userInputMessage, and repairs orphaned toolResults after trimming.
+
+    Uses pre-computed entry sizes to avoid re-serializing the entire payload
+    on every iteration (O(entries) instead of O(entries * payload_size)).
     """
     original_bytes = check_payload_size(payload)
     history = payload.get("conversationState", {}).get("history")
@@ -142,11 +145,30 @@ def trim_payload_to_limit(payload: Dict[str, Any], max_bytes: int) -> PayloadTri
     # Strip empty toolUses before measuring
     _strip_empty_tool_uses(history)
 
+    if original_bytes <= max_bytes:
+        return PayloadTrimStats(
+            original_bytes=original_bytes,
+            final_bytes=original_bytes,
+            original_entries=original_entries,
+            final_entries=original_entries,
+            trimmed=False,
+        )
+
+    # Pre-compute byte size of each entry to avoid repeated full-payload serialization
+    # Each entry contributes its serialized size + 1 byte for the comma separator
+    entry_sizes = [len(json.dumps(entry, separators=(",", ":")).encode("utf-8")) + 1 for entry in history]
+    estimated_bytes = original_bytes
+
     # Trim pairs from the beginning until under limit (keep at least 2 entries)
-    while len(history) > 2 and check_payload_size(payload) > max_bytes:
-        # Remove 2 entries (a user/assistant pair)
-        history.pop(0)
-        history.pop(0)
+    removed = 0
+    while len(history) - removed > 2 and estimated_bytes > max_bytes:
+        estimated_bytes -= entry_sizes[removed]
+        estimated_bytes -= entry_sizes[removed + 1]
+        removed += 2
+
+    # Apply removals in one slice (faster than repeated pop(0))
+    if removed > 0:
+        del history[:removed]
 
     # Align to userInputMessage boundary
     _align_to_user_message(history)

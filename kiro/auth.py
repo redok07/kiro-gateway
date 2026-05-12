@@ -175,6 +175,9 @@ class KiroAuthManager:
         # Fingerprint for User-Agent
         self._fingerprint = get_machine_fingerprint()
         
+        # Cached headers template (populated lazily by get_kiro_headers)
+        self._cached_headers: Optional[dict] = None
+        
         # Load credentials from SQLite if specified (takes priority over JSON)
         if sqlite_db:
             self._load_credentials_from_sqlite(sqlite_db)
