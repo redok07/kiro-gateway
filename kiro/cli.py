@@ -641,15 +641,9 @@ def run_login_flow() -> None:
         return
     headless = mode_choice != "2"
 
-    # Ask about registration
+    # Auto-register in credentials.json when account system is active
     from kiro.config import ACCOUNT_SYSTEM
-    register = False
-    if ACCOUNT_SYSTEM:
-        try:
-            reg_input = input(f"  Register in credentials.json? [Y/n]: ").strip().lower()
-        except (KeyboardInterrupt, EOFError):
-            return
-        register = reg_input != "n"
+    register = bool(ACCOUNT_SYSTEM)
 
     print()
     print(f"  {DIM}Starting login for {email}...{RESET}")
