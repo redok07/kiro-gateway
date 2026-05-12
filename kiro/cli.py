@@ -115,9 +115,9 @@ def start_server(host: Optional[str] = None, port: Optional[int] = None) -> bool
     final_port = port if port is not None else (SERVER_PORT or DEFAULT_SERVER_PORT)
 
     python_exe = sys.executable
-    main_script = str(GATEWAY_ROOT / "main.py")
 
-    cmd = [python_exe, main_script, "serve", "--host", final_host, "--port", str(final_port)]
+    # Use module invocation so it works both in dev (python main.py) and pip-installed mode
+    cmd = [python_exe, "-m", "kiro._entry", "serve", "--host", final_host, "--port", str(final_port)]
 
     kwargs = {
         "stdout": subprocess.DEVNULL,

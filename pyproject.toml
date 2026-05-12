@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kiro-gateway"
+version = "2.4.10"
+description = "OpenAI-compatible and Anthropic-compatible proxy for Kiro API (Amazon Q Developer)"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.10"
+authors = [
+    { name = "Jwadow" },
+]
+keywords = ["kiro", "gateway", "proxy", "openai", "anthropic", "aws", "codewhisperer"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: Proxy Servers",
+]
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "httpx[http2]",
+    "loguru",
+    "python-dotenv",
+    "tiktoken",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "hypothesis",
+]
+
+[project.urls]
+Homepage = "https://github.com/redok07/kiro-gateway"
+Repository = "https://github.com/redok07/kiro-gateway"
+Issues = "https://github.com/redok07/kiro-gateway/issues"
+
+[project.scripts]
+kiro-gateway = "kiro._entry:main"
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+include = ["kiro*"]
+
+[tool.setuptools.package-data]
+kiro = ["*.json", "*.example"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
