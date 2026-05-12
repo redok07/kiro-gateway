@@ -1,0 +1,29 @@
+[
+  {
+    "email": "your-first-account@gmail.com",
+    "password_env": "KIRO_LOGIN_PASSWORD_1",
+    "alias": "main",
+    "comment": "Primary account. Password read from env var KIRO_LOGIN_PASSWORD_1"
+  },
+  {
+    "email": "your-second-account@gmail.com",
+    "password_env": "KIRO_LOGIN_PASSWORD_2",
+    "alias": "backup",
+    "comment": "Backup account. Password read from env var KIRO_LOGIN_PASSWORD_2"
+  },
+  {
+    "email": "disabled-account@gmail.com",
+    "password_env": "KIRO_LOGIN_PASSWORD_3",
+    "alias": "disabled",
+    "enabled": false,
+    "comment": "This account is skipped during batch login (enabled=false)"
+  },
+  {
+    "email": "custom-output@gmail.com",
+    "password_env": "KIRO_LOGIN_PASSWORD_4",
+    "alias": "custom",
+    "output": "C:\\MyAccounts\\kiro-custom.json",
+    "proxy": "http://127.0.0.1:7890",
+    "comment": "Account with custom output path and per-account proxy"
+  }
+]

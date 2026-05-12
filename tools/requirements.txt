@@ -1,0 +1,15 @@
+# Kiro Auto-Login Tool Dependencies
+# Install: pip install -r requirements.txt
+#
+# NOTE: Camoufox downloads a ~100MB Firefox fork on first run.
+# This is expected behavior and only happens once.
+
+# Browser automation (anti-detect Playwright-based)
+camoufox[geoip]>=0.4.0
+browserforge>=1.2.0
+
+# Async HTTP client
+aiohttp>=3.9.0
+
+# SSL certificate handling (optional, for proxy environments)
+certifi>=2024.0.0
