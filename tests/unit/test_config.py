@@ -351,7 +351,8 @@ class TestServerHostConfig:
         """
         print("Setup: Removing SERVER_HOST from environment...")
         
-        with patch.dict(os.environ, {}, clear=False):
+        with patch.dict(os.environ, {}, clear=False), \
+             patch("dotenv.load_dotenv"):
             if "SERVER_HOST" in os.environ:
                 del os.environ["SERVER_HOST"]
             
@@ -407,7 +408,8 @@ class TestServerPortConfig:
         """
         print("Setup: Removing SERVER_PORT from environment...")
         
-        with patch.dict(os.environ, {}, clear=False):
+        with patch.dict(os.environ, {}, clear=False), \
+             patch("dotenv.load_dotenv"):
             if "SERVER_PORT" in os.environ:
                 del os.environ["SERVER_PORT"]
             
@@ -860,7 +862,7 @@ class TestAccountSystemConfig:
     
     def test_accounts_config_file_default(self, monkeypatch):
         """
-        What it does: Verifies ACCOUNTS_CONFIG_FILE defaults to credentials.json.
+        What it does: Verifies ACCOUNTS_CONFIG_FILE defaults to credentials.json (possibly resolved to absolute).
         Purpose: Ensure default path for credentials configuration.
         """
         print("Setup: Removing ACCOUNTS_CONFIG_FILE from environment...")
@@ -871,12 +873,13 @@ class TestAccountSystemConfig:
         import kiro.config as config_module
         reload(config_module)
         
-        print(f"Comparing ACCOUNTS_CONFIG_FILE: Expected 'credentials.json', Got '{config_module.ACCOUNTS_CONFIG_FILE}'")
-        assert config_module.ACCOUNTS_CONFIG_FILE == "credentials.json"
+        print(f"Comparing ACCOUNTS_CONFIG_FILE: Got '{config_module.ACCOUNTS_CONFIG_FILE}'")
+        # The value is resolved to an absolute path relative to the .env directory
+        assert config_module.ACCOUNTS_CONFIG_FILE.endswith("credentials.json")
     
     def test_accounts_state_file_default(self, monkeypatch):
         """
-        What it does: Verifies ACCOUNTS_STATE_FILE defaults to state.json.
+        What it does: Verifies ACCOUNTS_STATE_FILE defaults to state.json (possibly resolved to absolute).
         Purpose: Ensure default path for runtime state file.
         """
         print("Setup: Removing ACCOUNTS_STATE_FILE from environment...")
@@ -887,8 +890,9 @@ class TestAccountSystemConfig:
         import kiro.config as config_module
         reload(config_module)
         
-        print(f"Comparing ACCOUNTS_STATE_FILE: Expected 'state.json', Got '{config_module.ACCOUNTS_STATE_FILE}'")
-        assert config_module.ACCOUNTS_STATE_FILE == "state.json"
+        print(f"Comparing ACCOUNTS_STATE_FILE: Got '{config_module.ACCOUNTS_STATE_FILE}'")
+        # The value is resolved to an absolute path relative to the .env directory
+        assert config_module.ACCOUNTS_STATE_FILE.endswith("state.json")
     
     def test_account_recovery_timeout_default(self, monkeypatch):
         """

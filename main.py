@@ -653,6 +653,16 @@ Examples:
         version=f"%(prog)s {APP_VERSION}"
     )
     
+    # Top-level host/port for backward compat (python main.py --port 9000)
+    parser.add_argument(
+        "-H", "--host", type=str, default=None, metavar="HOST",
+        help=f"Server host (default: {DEFAULT_SERVER_HOST})"
+    )
+    parser.add_argument(
+        "-p", "--port", type=int, default=None, metavar="PORT",
+        help=f"Server port (default: {DEFAULT_SERVER_PORT})"
+    )
+    
     subparsers = parser.add_subparsers(dest="command")
     
     # serve: run in foreground (legacy behavior)

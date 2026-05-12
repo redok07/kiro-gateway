@@ -145,10 +145,14 @@ def trim_payload_to_limit(payload: Dict[str, Any], max_bytes: int) -> PayloadTri
     # Strip empty toolUses before measuring
     _strip_empty_tool_uses(history)
 
+    # Always repair orphaned tool results (data integrity, not size-dependent)
+    _repair_orphaned_tool_results(history)
+
     if original_bytes <= max_bytes:
+        final_bytes = check_payload_size(payload)
         return PayloadTrimStats(
             original_bytes=original_bytes,
-            final_bytes=original_bytes,
+            final_bytes=final_bytes,
             original_entries=original_entries,
             final_entries=original_entries,
             trimmed=False,

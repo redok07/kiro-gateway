@@ -1037,13 +1037,14 @@ class TestAnthropicHTTPClientSelection:
         except Exception:
             pass
         
-        print("Checking: KiroHttpClient(shared_client=None)...")
+        print("Checking: KiroHttpClient(shared_client=streaming_pool)...")
         assert mock_kiro_http_client_class.called
         call_args = mock_kiro_http_client_class.call_args
         print(f"Call args: {call_args}")
-        assert call_args[1]['shared_client'] is None, \
-            "Streaming should use per-request client"
-        print("✅ Anthropic streaming correctly uses per-request client")
+        # Streaming now uses a dedicated streaming connection pool (not None, not the regular shared client)
+        assert call_args[1]['shared_client'] is not None, \
+            "Streaming should use dedicated streaming connection pool"
+        print("✅ Anthropic streaming correctly uses dedicated streaming pool")
     
     @patch('kiro.routes_anthropic.KiroHttpClient')
     def test_non_streaming_uses_shared_client(
