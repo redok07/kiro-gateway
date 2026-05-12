@@ -1,15 +1,17 @@
-# Kiro Gateway - One-line installer for Windows
+# Kiro Gateway - Zero-dependency installer for Windows
 # Usage: irm https://raw.githubusercontent.com/redok07/kiro-gateway/main/install.ps1 | iex
 #
-# What this does:
-#   1. Checks Python 3.10+ is available
-#   2. Creates ~/.kiro-gateway/ with a virtual environment
-#   3. Installs kiro-gateway from GitHub via pip
-#   4. Creates a .cmd wrapper in ~/.kiro-gateway/bin/
-#   5. Adds ~/.kiro-gateway/bin to your user PATH
-#   6. Creates a starter .env if none exists
+# This installer is fully autonomous. It will:
+#   1. Install Python 3.12 if not found (via winget or direct download)
+#   2. Install git if not found (via winget or direct download)
+#   3. Create ~/.kiro-gateway/ with a virtual environment
+#   4. Install kiro-gateway from GitHub via pip
+#   5. Create a .cmd wrapper in ~/.kiro-gateway/bin/
+#   6. Add ~/.kiro-gateway/bin to your user PATH
+#   7. Create a starter .env if none exists
 #
 # Re-running this script upgrades an existing installation safely.
+# No pre-requisites needed - works on a fresh Windows install.
 
 $ErrorActionPreference = "Stop"
 
@@ -18,7 +20,7 @@ $InstallDir = Join-Path $env:USERPROFILE ".kiro-gateway"
 $BinDir = Join-Path $InstallDir "bin"
 $VenvDir = Join-Path $InstallDir "venv"
 $EnvFile = Join-Path $InstallDir ".env"
-$MinPython = "3.10"
+$TempDir = Join-Path $env:TEMP "kiro-gateway-install"
 
 # --- Helpers ---
 function Write-Info  { param($Msg) Write-Host "  [info]  $Msg" -ForegroundColor Cyan }
@@ -56,6 +58,106 @@ function Find-Python {
     } catch {}
 
     return $null
+}
+
+function Install-Python {
+    Write-Info "Python 3.10+ not found. Installing Python 3.12..."
+
+    # Try winget first (available on Windows 10 1709+ and Windows 11)
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Info "Using winget to install Python..."
+        winget install Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            # Refresh PATH for current session
+            $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+            $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+            $env:Path = "$machinePath;$userPath"
+            Write-Ok "Python installed via winget"
+            return
+        }
+        Write-Warn "winget install failed, trying direct download..."
+    }
+
+    # Direct download from python.org
+    Write-Info "Downloading Python 3.12 installer..."
+    New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
+
+    $arch = if ([Environment]::Is64BitOperatingSystem) { "amd64" } else { "win32" }
+    $installerUrl = "https://www.python.org/ftp/python/3.12.8/python-3.12.8-$arch.exe"
+    $installerPath = Join-Path $TempDir "python-installer.exe"
+
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing
+    } catch {
+        Write-Fail "Failed to download Python installer. Check your internet connection.`nURL: $installerUrl"
+    }
+
+    Write-Info "Running Python installer (silent, adds to PATH)..."
+    $installArgs = "/quiet", "InstallAllUsers=0", "PrependPath=1", "Include_pip=1", "Include_launcher=1"
+    Start-Process -FilePath $installerPath -ArgumentList $installArgs -Wait -NoNewWindow
+
+    # Refresh PATH
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = "$machinePath;$userPath"
+
+    # Clean up installer
+    Remove-Item -Path $installerPath -Force -ErrorAction SilentlyContinue
+
+    Write-Ok "Python 3.12 installed"
+}
+
+function Install-Git {
+    Write-Info "git not found. Installing git..."
+
+    # Try winget first
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Info "Using winget to install git..."
+        winget install Git.Git --accept-package-agreements --accept-source-agreements --silent 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+            $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+            $env:Path = "$machinePath;$userPath"
+            Write-Ok "git installed via winget"
+            return
+        }
+        Write-Warn "winget install failed, trying direct download..."
+    }
+
+    # Direct download
+    Write-Info "Downloading git installer..."
+    New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
+
+    $arch = if ([Environment]::Is64BitOperatingSystem) { "64-bit" } else { "32-bit" }
+    # Use Git for Windows release API to get latest
+    $gitInstallerPath = Join-Path $TempDir "git-installer.exe"
+
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        # Get latest release info
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/git-for-windows/git/releases/latest" -UseBasicParsing
+        $asset = $releases.assets | Where-Object { $_.name -match "Git-.*-$arch\.exe$" -and $_.name -notmatch "portable" } | Select-Object -First 1
+        if (-not $asset) {
+            Write-Fail "Could not find git installer for $arch"
+        }
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $gitInstallerPath -UseBasicParsing
+    } catch {
+        Write-Fail "Failed to download git installer. Check your internet connection."
+    }
+
+    Write-Info "Running git installer (silent)..."
+    Start-Process -FilePath $gitInstallerPath -ArgumentList "/VERYSILENT", "/NORESTART", "/NOCANCEL", "/SP-", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS", "/COMPONENTS=`"icons,ext\reg\shellhere,assoc,assoc_sh`"" -Wait -NoNewWindow
+
+    # Refresh PATH
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = "$machinePath;$userPath"
+
+    # Clean up
+    Remove-Item -Path $gitInstallerPath -Force -ErrorAction SilentlyContinue
+
+    Write-Ok "git installed"
 }
 
 function Add-ToUserPath {
@@ -98,22 +200,36 @@ function Main {
     Write-Host "  Cross-platform proxy for Kiro API (Amazon Q Developer)" -ForegroundColor DarkGray
     Write-Host ""
 
-    # 1. Find Python
-    Write-Info "Looking for Python >= $MinPython..."
+    # 1. Ensure git is available
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        Install-Git
+        if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+            Write-Fail "Failed to install git. Install manually: https://git-scm.com/downloads"
+        }
+    } else {
+        Write-Ok "git found: $(git --version)"
+    }
+
+    # 2. Ensure Python 3.10+ is available
+    Write-Info "Looking for Python >= 3.10..."
     $python = Find-Python
     if (-not $python) {
-        Write-Fail "Python 3.10+ not found. Install from: https://www.python.org/downloads/`nMake sure to check 'Add Python to PATH' during installation."
+        Install-Python
+        $python = Find-Python
+        if (-not $python) {
+            Write-Fail "Failed to install Python 3.10+. Install manually: https://www.python.org/downloads/`nMake sure to check 'Add Python to PATH' during installation."
+        }
     }
 
     $pyver = & $python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"
     Write-Ok "Found $python ($pyver)"
 
-    # 2. Create install directory
+    # 3. Create install directory
     Write-Info "Setting up $InstallDir..."
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
 
-    # 3. Create or reuse venv
+    # 4. Create or reuse venv
     $venvPython = Join-Path $VenvDir "Scripts\python.exe"
     if (Test-Path $venvPython) {
         Write-Info "Virtual environment exists, reusing..."
@@ -126,7 +242,11 @@ function Main {
     }
     Write-Ok "Virtual environment ready"
 
-    # 4. Install/upgrade kiro-gateway
+    # 5. Upgrade pip
+    Write-Info "Ensuring pip is up to date..."
+    & (Join-Path $VenvDir "Scripts\python.exe") -m pip install --upgrade --quiet pip 2>$null
+
+    # 6. Install/upgrade kiro-gateway
     Write-Info "Installing kiro-gateway from GitHub (this may take a minute)..."
     $pip = Join-Path $VenvDir "Scripts\pip.exe"
     & $pip install --upgrade --quiet "git+$Repo"
@@ -143,7 +263,7 @@ function Main {
     }
     Write-Ok "Installed kiro-gateway $installedVer"
 
-    # 5. Create .cmd wrapper
+    # 7. Create .cmd wrapper
     $wrapperPath = Join-Path $BinDir "kiro-gateway.cmd"
     $wrapperContent = "@echo off`r`n`"%~dp0\..\venv\Scripts\kiro-gateway.exe`" %*"
     Set-Content -Path $wrapperPath -Value $wrapperContent -Encoding ASCII
@@ -157,7 +277,7 @@ $exe = Join-Path $PSScriptRoot "..\venv\Scripts\kiro-gateway.exe"
 '@
     Set-Content -Path $ps1Wrapper -Value $ps1Content -Encoding UTF8
 
-    # 6. Create .env if not exists
+    # 8. Create .env if not exists
     if (-not (Test-Path $EnvFile)) {
         $envContent = @'
 # Kiro Gateway Configuration
@@ -190,10 +310,15 @@ PROXY_API_KEY="CHANGE_ME_TO_A_STRONG_RANDOM_STRING"
         Write-Info ".env already exists, keeping current config"
     }
 
-    # 7. Add to PATH
+    # 9. Add to PATH
     Add-ToUserPath -Dir $BinDir
 
-    # 8. Done
+    # 10. Clean up temp
+    if (Test-Path $TempDir) {
+        Remove-Item -Path $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # 11. Done
     Write-Host ""
     Write-Host "  Installation complete!" -ForegroundColor Green
     Write-Host ""

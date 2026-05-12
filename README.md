@@ -71,41 +71,81 @@ Made with ❤️ by [@Jwadow](https://github.com/jwadow)
 
 ## 🚀 Quick Start
 
-**Choose your deployment method:**
-- 🐍 **Native Python** - Full control, easy debugging
-- 🐳 **Docker** - Isolated environment, easy deployment → [jump to Docker](#-docker-deployment)
+**One command. No pre-requisites.** The installer handles everything automatically (Python, git, venv, PATH).
 
-### Prerequisites
-
-- Python 3.10+
-- One of the following:
-  - [Kiro IDE](https://kiro.dev/) with logged in account, OR
-  - [Kiro CLI](https://kiro.dev/cli/) with AWS SSO (AWS IAM Identity Center, OIDC) - free Builder ID or corporate account
-
-### Installation
+### Linux / macOS
 
 ```bash
-# Clone the repository (requires Git)
-git clone https://github.com/Jwadow/kiro-gateway.git
-cd kiro-gateway
+curl -fsSL https://raw.githubusercontent.com/redok07/kiro-gateway/main/install.sh | bash
+```
 
-# Or download ZIP: Code → Download ZIP → extract → open kiro-gateway folder
+### Windows (PowerShell)
 
-# Install dependencies
-pip install -r requirements.txt
+```powershell
+irm https://raw.githubusercontent.com/redok07/kiro-gateway/main/install.ps1 | iex
+```
 
-# Configure (see Configuration section)
-cp .env.example .env
-# Copy and edit .env with your credentials
+### After Installation
 
-# Start the server
-python main.py
+```bash
+# 1. Edit config (set your PROXY_API_KEY and auth method)
+nano ~/.kiro-gateway/.env        # Linux/macOS
+notepad %USERPROFILE%\.kiro-gateway\.env  # Windows
 
-# Or with custom port (if 8000 is busy)
-python main.py --port 9000
+# 2. Start the gateway
+kiro-gateway
 ```
 
 The server will be available at `http://localhost:8000`
+
+> 💡 **Upgrade anytime** by re-running the same install command. Your config is preserved.
+
+> 💡 **Uninstall:** `rm -rf ~/.kiro-gateway` (Linux/macOS) or `Remove-Item -Recurse ~\.kiro-gateway` (Windows)
+
+---
+
+### Alternative Installation Methods
+
+<details>
+<summary>🐍 Manual Python (full control)</summary>
+
+**Prerequisites:** Python 3.10+, git
+
+```bash
+git clone https://github.com/redok07/kiro-gateway.git
+cd kiro-gateway
+pip install -r requirements.txt
+cp .env.example .env
+# Edit .env with your credentials
+python main.py
+```
+
+</details>
+
+<details>
+<summary>📦 pip install (no git clone needed)</summary>
+
+```bash
+pip install git+https://github.com/redok07/kiro-gateway.git
+kiro-gateway
+```
+
+</details>
+
+<details>
+<summary>🐳 Docker (isolated environment)</summary>
+
+See [Docker Deployment](#-docker-deployment) below.
+
+</details>
+
+---
+
+### Authentication
+
+You need one of the following:
+- [Kiro IDE](https://kiro.dev/) with logged in account, OR
+- [Kiro CLI](https://kiro.dev/cli/) with AWS SSO (AWS IAM Identity Center, OIDC) - free Builder ID or corporate account
 
 ---
 

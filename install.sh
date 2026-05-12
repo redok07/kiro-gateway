@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Kiro Gateway - One-line installer for Linux and macOS
+# Kiro Gateway - Zero-dependency installer for Linux and macOS
 # Usage: curl -fsSL https://raw.githubusercontent.com/redok07/kiro-gateway/main/install.sh | bash
 #
-# What this does:
-#   1. Checks Python 3.10+ is available
-#   2. Creates ~/.kiro-gateway/ with a virtual environment
-#   3. Installs kiro-gateway from GitHub via pip
-#   4. Creates a shell wrapper in ~/.kiro-gateway/bin/
-#   5. Adds ~/.kiro-gateway/bin to your PATH (shell profile)
-#   6. Creates a starter .env if none exists
+# This installer is fully autonomous. It will:
+#   1. Install Python 3.10+ if not found (via apt/dnf/brew)
+#   2. Install git if not found
+#   3. Create ~/.kiro-gateway/ with a virtual environment
+#   4. Install kiro-gateway from GitHub via pip
+#   5. Create a shell wrapper in ~/.kiro-gateway/bin/
+#   6. Add ~/.kiro-gateway/bin to your PATH (shell profile)
+#   7. Create a starter .env if none exists
 #
 # Re-running this script upgrades an existing installation safely.
+# No pre-requisites needed - works on a fresh VPS out of the box.
 
 set -euo pipefail
 
@@ -35,6 +37,141 @@ ok()    { printf "${GREEN}[ok]${RESET}    %s\n" "$1"; }
 warn()  { printf "${YELLOW}[warn]${RESET}  %s\n" "$1"; }
 fail()  { printf "${RED}[error]${RESET} %s\n" "$1"; exit 1; }
 
+# --- Detect package manager ---
+detect_pkg_manager() {
+    if command -v apt-get &>/dev/null; then
+        echo "apt"
+    elif command -v dnf &>/dev/null; then
+        echo "dnf"
+    elif command -v yum &>/dev/null; then
+        echo "yum"
+    elif command -v pacman &>/dev/null; then
+        echo "pacman"
+    elif command -v apk &>/dev/null; then
+        echo "apk"
+    elif command -v zypper &>/dev/null; then
+        echo "zypper"
+    elif command -v brew &>/dev/null; then
+        echo "brew"
+    else
+        echo "unknown"
+    fi
+}
+
+# --- Get sudo command (empty if already root) ---
+get_sudo() {
+    if [ "$(id -u)" -eq 0 ]; then
+        echo ""
+    elif command -v sudo &>/dev/null; then
+        echo "sudo"
+    else
+        echo ""
+    fi
+}
+
+# --- Install Python ---
+install_python() {
+    local pkg_mgr="$1"
+    local sudo_cmd
+    sudo_cmd=$(get_sudo)
+
+    info "Installing Python 3..."
+    case "$pkg_mgr" in
+        apt)
+            $sudo_cmd apt-get update -qq
+            $sudo_cmd apt-get install -y -qq python3 python3-venv python3-pip
+            ;;
+        dnf)
+            $sudo_cmd dnf install -y -q python3 python3-pip
+            ;;
+        yum)
+            $sudo_cmd yum install -y -q python3 python3-pip
+            ;;
+        pacman)
+            $sudo_cmd pacman -Sy --noconfirm python python-pip
+            ;;
+        apk)
+            $sudo_cmd apk add --quiet python3 py3-pip python3-dev
+            ;;
+        zypper)
+            $sudo_cmd zypper install -y -q python3 python3-pip python3-venv
+            ;;
+        brew)
+            brew install python@3.12
+            ;;
+        *)
+            fail "Cannot auto-install Python. No supported package manager found.
+    Install Python 3.10+ manually: https://www.python.org/downloads/"
+            ;;
+    esac
+}
+
+# --- Install git ---
+install_git() {
+    local pkg_mgr="$1"
+    local sudo_cmd
+    sudo_cmd=$(get_sudo)
+
+    info "Installing git..."
+    case "$pkg_mgr" in
+        apt)
+            $sudo_cmd apt-get update -qq
+            $sudo_cmd apt-get install -y -qq git
+            ;;
+        dnf)
+            $sudo_cmd dnf install -y -q git
+            ;;
+        yum)
+            $sudo_cmd yum install -y -q git
+            ;;
+        pacman)
+            $sudo_cmd pacman -Sy --noconfirm git
+            ;;
+        apk)
+            $sudo_cmd apk add --quiet git
+            ;;
+        zypper)
+            $sudo_cmd zypper install -y -q git
+            ;;
+        brew)
+            brew install git
+            ;;
+        *)
+            fail "Cannot auto-install git. No supported package manager found.
+    Install git manually: https://git-scm.com/downloads"
+            ;;
+    esac
+}
+
+# --- Install curl (needed for pip sometimes) ---
+install_curl() {
+    local pkg_mgr="$1"
+    local sudo_cmd
+    sudo_cmd=$(get_sudo)
+
+    info "Installing curl..."
+    case "$pkg_mgr" in
+        apt)
+            $sudo_cmd apt-get install -y -qq curl
+            ;;
+        dnf|yum)
+            $sudo_cmd $pkg_mgr install -y -q curl
+            ;;
+        pacman)
+            $sudo_cmd pacman -Sy --noconfirm curl
+            ;;
+        apk)
+            $sudo_cmd apk add --quiet curl
+            ;;
+        zypper)
+            $sudo_cmd zypper install -y -q curl
+            ;;
+        brew)
+            : # curl always available on macOS
+            ;;
+    esac
+}
+
 # --- Find Python 3.10+ ---
 find_python() {
     for cmd in python3 python python3.13 python3.12 python3.11 python3.10; do
@@ -53,15 +190,33 @@ find_python() {
     return 1
 }
 
-# --- Version comparison ---
-version_gte() {
-    local major minor
-    major=$(echo "$1" | cut -d. -f1)
-    minor=$(echo "$1" | cut -d. -f2)
-    local req_major req_minor
-    req_major=$(echo "$2" | cut -d. -f1)
-    req_minor=$(echo "$2" | cut -d. -f2)
-    [ "$major" -gt "$req_major" ] || { [ "$major" -eq "$req_major" ] && [ "$minor" -ge "$req_minor" ]; }
+# --- Check if venv module is available ---
+check_venv_module() {
+    local python_cmd="$1"
+    "$python_cmd" -c "import venv" 2>/dev/null
+}
+
+# --- Install venv module if missing ---
+install_venv_module() {
+    local pkg_mgr="$1"
+    local sudo_cmd
+    sudo_cmd=$(get_sudo)
+
+    info "Installing python3-venv..."
+    case "$pkg_mgr" in
+        apt)
+            # Need to find the right python3-venv package for the installed version
+            local pyver
+            pyver=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "3")
+            $sudo_cmd apt-get install -y -qq "python${pyver}-venv" 2>/dev/null || $sudo_cmd apt-get install -y -qq python3-venv
+            ;;
+        dnf|yum)
+            : # venv is included in python3 on Fedora/RHEL
+            ;;
+        pacman|apk|zypper|brew)
+            : # venv is included in python3 on these
+            ;;
+    esac
 }
 
 # --- Main ---
@@ -69,33 +224,58 @@ main() {
     printf "\n${BOLD}  Kiro Gateway Installer${RESET}\n"
     printf "${DIM}  Cross-platform proxy for Kiro API (Amazon Q Developer)${RESET}\n\n"
 
-    # 1. Find Python
+    local pkg_mgr
+    pkg_mgr=$(detect_pkg_manager)
+    info "Detected package manager: $pkg_mgr"
+
+    # 1. Ensure git is available
+    if ! command -v git &>/dev/null; then
+        warn "git not found, installing..."
+        install_git "$pkg_mgr"
+        command -v git &>/dev/null || fail "Failed to install git"
+        ok "git installed"
+    else
+        ok "git found: $(git --version)"
+    fi
+
+    # 2. Ensure Python 3.10+ is available
     info "Looking for Python >= $MIN_PYTHON..."
-    PYTHON=$(find_python) || fail "Python 3.10+ not found. Install it first:
-    Ubuntu/Debian: sudo apt install python3 python3-venv python3-pip
-    Fedora:        sudo dnf install python3
-    macOS:         brew install python@3.12
-    Other:         https://www.python.org/downloads/"
+    if ! PYTHON=$(find_python); then
+        warn "Python 3.10+ not found, installing..."
+        install_python "$pkg_mgr"
+        PYTHON=$(find_python) || fail "Failed to install Python 3.10+. Install manually: https://www.python.org/downloads/"
+    fi
 
     local pyver
     pyver=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')")
     ok "Found $PYTHON ($pyver)"
 
-    # 2. Create install directory
+    # 3. Ensure venv module is available
+    if ! check_venv_module "$PYTHON"; then
+        warn "python3-venv not found, installing..."
+        install_venv_module "$pkg_mgr"
+        check_venv_module "$PYTHON" || fail "Failed to install python3-venv. Install manually:
+    Ubuntu/Debian: sudo apt install python3-venv"
+    fi
+
+    # 4. Create install directory
     info "Setting up $INSTALL_DIR..."
     mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 
-    # 3. Create or reuse venv
+    # 5. Create or reuse venv
     if [ -f "$VENV_DIR/bin/python" ]; then
         info "Virtual environment exists, reusing..."
     else
         info "Creating virtual environment..."
-        "$PYTHON" -m venv "$VENV_DIR" || fail "Failed to create venv. Install python3-venv:
-    Ubuntu/Debian: sudo apt install python3-venv"
+        "$PYTHON" -m venv "$VENV_DIR" || fail "Failed to create virtual environment"
     fi
     ok "Virtual environment ready"
 
-    # 4. Install/upgrade kiro-gateway
+    # 6. Upgrade pip first (avoid old pip issues on fresh systems)
+    info "Ensuring pip is up to date..."
+    "$VENV_DIR/bin/python" -m pip install --upgrade --quiet pip 2>/dev/null || true
+
+    # 7. Install/upgrade kiro-gateway
     info "Installing kiro-gateway from GitHub (this may take a minute)..."
     "$VENV_DIR/bin/pip" install --upgrade --quiet "git+${REPO}" || fail "pip install failed. Check your internet connection."
 
@@ -103,7 +283,7 @@ main() {
     installed_ver=$("$VENV_DIR/bin/kiro-gateway" --version 2>/dev/null || echo "unknown")
     ok "Installed kiro-gateway $installed_ver"
 
-    # 5. Create shell wrapper
+    # 8. Create shell wrapper
     cat > "$BIN_DIR/kiro-gateway" << 'WRAPPER'
 #!/usr/bin/env bash
 # Kiro Gateway launcher - auto-generated by installer
@@ -112,7 +292,7 @@ exec "$SCRIPT_DIR/venv/bin/kiro-gateway" "$@"
 WRAPPER
     chmod +x "$BIN_DIR/kiro-gateway"
 
-    # 6. Create .env if not exists
+    # 9. Create .env if not exists
     if [ ! -f "$ENV_FILE" ]; then
         cat > "$ENV_FILE" << 'ENVFILE'
 # Kiro Gateway Configuration
@@ -144,10 +324,10 @@ ENVFILE
         info ".env already exists, keeping current config"
     fi
 
-    # 7. Add to PATH
+    # 10. Add to PATH
     add_to_path
 
-    # 8. Done
+    # 11. Done
     printf "\n${GREEN}${BOLD}  Installation complete!${RESET}\n\n"
     printf "  ${BOLD}Next steps:${RESET}\n"
     printf "  ${CYAN}1.${RESET} Edit your config:  ${DIM}nano $ENV_FILE${RESET}\n"
@@ -156,7 +336,7 @@ ENVFILE
     printf "\n"
     printf "  ${DIM}Or start immediately: $BIN_DIR/kiro-gateway${RESET}\n"
     printf "  ${DIM}Upgrade later:        curl -fsSL https://raw.githubusercontent.com/redok07/kiro-gateway/main/install.sh | bash${RESET}\n"
-    printf "  ${DIM}Uninstall:            rm -rf $INSTALL_DIR${RESET}\n\n"
+    printf "  ${DIM}Uninstall:            rm -rf $INSTALL_DIR && remove PATH entry from shell profile${RESET}\n\n"
 }
 
 add_to_path() {
