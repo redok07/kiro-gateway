@@ -41,7 +41,7 @@ import os
 
 # Maximum number of simultaneous requests allowed per account.
 # Requests beyond this limit are held in the queue until a slot opens.
-MAX_CONCURRENT_PER_ACCOUNT: int = int(os.getenv("MAX_CONCURRENT_PER_ACCOUNT", "2"))
+MAX_CONCURRENT_PER_ACCOUNT: int = int(os.getenv("MAX_CONCURRENT_PER_ACCOUNT", "1"))
 
 # Maximum number of requests that can wait in the queue.
 # When the queue is full, new requests are rejected with HTTP 503.
