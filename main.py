@@ -815,10 +815,11 @@ def print_startup_banner(host: str, port: int) -> None:
     print(f"  {DIM}API Docs:      {url}/docs{RESET}")
     print(f"  {DIM}Health Check:  {url}/health{RESET}")
     print()
-    _safe_print(f"  {DIM}{'\u2500' * 48}{RESET}")
+    _hr = '\u2500' * 48
+    _safe_print(f"  {DIM}{_hr}{RESET}")
     _safe_print(f"  {WHITE}\U0001f4ac Found a bug? Need help? Have questions?{RESET}")
     _safe_print(f"  {YELLOW}\u279c  https://github.com/jwadow/kiro-gateway/issues{RESET}")
-    _safe_print(f"  {DIM}{'\u2500' * 48}{RESET}")
+    _safe_print(f"  {DIM}{_hr}{RESET}")
     print()
 
 
