@@ -267,12 +267,13 @@ class TestKiroHttpClientRequestWithRetry:
         print("Action: Executing request...")
         with patch.object(http_client, '_get_client', return_value=mock_client):
             with patch('kiro.http_client.get_kiro_headers', return_value={}):
-                with patch('kiro.http_client.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
-                    response = await http_client.request_with_retry(
-                        "POST",
-                        "https://api.example.com/test",
-                        {"data": "value"}
-                    )
+                with patch('kiro.http_client.RETRY_429_ON_SAME_ACCOUNT', 1):
+                    with patch('kiro.http_client.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+                        response = await http_client.request_with_retry(
+                            "POST",
+                            "https://api.example.com/test",
+                            {"data": "value"}
+                        )
         
         print("Verification: sleep() called for backoff...")
         mock_sleep.assert_called_once()
@@ -544,12 +545,13 @@ class TestKiroHttpClientExponentialBackoff:
         print("Action: Executing request with multiple retries...")
         with patch.object(http_client, '_get_client', return_value=mock_client):
             with patch('kiro.http_client.get_kiro_headers', return_value={}):
-                with patch('kiro.http_client.asyncio.sleep', side_effect=capture_sleep):
-                    response = await http_client.request_with_retry(
-                        "POST",
-                        "https://api.example.com/test",
-                        {"data": "value"}
-                    )
+                with patch('kiro.http_client.RETRY_429_ON_SAME_ACCOUNT', 3):
+                    with patch('kiro.http_client.asyncio.sleep', side_effect=capture_sleep):
+                        response = await http_client.request_with_retry(
+                            "POST",
+                            "https://api.example.com/test",
+                            {"data": "value"}
+                        )
         
         print(f"Verification: Delays increase exponentially...")
         print(f"Delays: {sleep_delays}")

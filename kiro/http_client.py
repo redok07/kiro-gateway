@@ -41,6 +41,8 @@ from kiro.config import MAX_RETRIES, BASE_RETRY_DELAY, FIRST_TOKEN_MAX_RETRIES, 
 from kiro.auth import KiroAuthManager
 from kiro.utils import get_kiro_headers
 from kiro.network_errors import classify_network_error, get_short_error_message, NetworkErrorInfo
+from kiro.queue_config import RETRY_429_ON_SAME_ACCOUNT
+from kiro.exceptions import AccountRateLimited
 
 
 class KiroHttpClient:
@@ -243,13 +245,42 @@ class KiroHttpClient:
                     await self.auth_manager.force_refresh()
                     continue
                 
-                # 429 - rate limit, wait and retry
+                # 429 - rate limit
                 if response.status_code == 429:
-                    last_response = response  # Сохраняем для возврата после exhaustion
-                    delay = BASE_RETRY_DELAY * (2 ** attempt)
-                    logger.warning(f"Received 429, waiting {delay}s (attempt {attempt + 1}/{max_retries})")
-                    await asyncio.sleep(delay)
-                    continue
+                    # Parse Retry-After header if present
+                    retry_after_raw = response.headers.get("Retry-After", "")
+                    retry_after: float = 0.0
+                    if retry_after_raw:
+                        try:
+                            retry_after = float(retry_after_raw)
+                        except (ValueError, TypeError):
+                            retry_after = 0.0
+
+                    if RETRY_429_ON_SAME_ACCOUNT == 0:
+                        # Immediately signal caller to route to a different account
+                        logger.warning(
+                            f"Received 429 (retry_after={retry_after}s) — "
+                            f"raising AccountRateLimited (RETRY_429_ON_SAME_ACCOUNT=0)"
+                        )
+                        raise AccountRateLimited(retry_after=retry_after)
+
+                    # RETRY_429_ON_SAME_ACCOUNT > 0: retry on same account up to that limit
+                    if attempt < RETRY_429_ON_SAME_ACCOUNT:
+                        last_response = response
+                        delay = BASE_RETRY_DELAY * (2 ** attempt)
+                        logger.warning(
+                            f"Received 429, waiting {delay}s "
+                            f"(attempt {attempt + 1}/{RETRY_429_ON_SAME_ACCOUNT})"
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        # Exhausted same-account retries for 429 — raise to let caller decide
+                        logger.warning(
+                            f"Received 429 after {RETRY_429_ON_SAME_ACCOUNT} retries — "
+                            f"raising AccountRateLimited"
+                        )
+                        raise AccountRateLimited(retry_after=retry_after)
                 
                 # 5xx - server error, wait and retry
                 if 500 <= response.status_code < 600:

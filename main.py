@@ -537,11 +537,30 @@ async def lifespan(app: FastAPI):
     app.state.account_manager.start_background_refresh()
 
     logger.info("Account system initialized successfully")
+
+    # ==============================================================================
+    # Initialize Request Queue Orchestrator
+    # ==============================================================================
+    from kiro.queue_config import QUEUE_ENABLED
+    if QUEUE_ENABLED:
+        from kiro.request_queue import RequestQueueOrchestrator, ConcurrencyLimiter, FairScheduler
+        limiter = ConcurrencyLimiter()
+        scheduler = FairScheduler()
+        app.state.queue_orchestrator = RequestQueueOrchestrator(limiter, scheduler)
+        await app.state.queue_orchestrator.start()
+        logger.info("Request queue orchestrator started")
+    else:
+        app.state.queue_orchestrator = None
     
     yield
     
     # Graceful shutdown
     logger.info("Shutting down application...")
+
+    # Stop queue orchestrator
+    if getattr(app.state, 'queue_orchestrator', None):
+        await app.state.queue_orchestrator.stop()
+        logger.info("Request queue orchestrator stopped")
 
     # Stop background token refresh task
     await app.state.account_manager.stop_background_refresh()

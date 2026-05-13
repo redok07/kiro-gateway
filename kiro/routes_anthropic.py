@@ -25,6 +25,7 @@ Contains the /v1/messages endpoint compatible with Anthropic's Messages API.
 Reference: https://docs.anthropic.com/en/api/messages
 """
 
+import asyncio
 import json
 from typing import Optional
 
@@ -35,6 +36,8 @@ from fastapi.security import APIKeyHeader
 from loguru import logger
 
 from kiro.config import PROXY_API_KEY
+from kiro.queue_config import QUEUE_ENABLED
+from kiro.exceptions import AccountRateLimited, QueueTimeoutError, QueueFullError
 from kiro.models_anthropic import (
     AnthropicMessagesRequest,
     AnthropicCountTokensRequest,
@@ -323,6 +326,11 @@ async def messages(
         all_accounts = list(account_manager._accounts.keys())
         MAX_ATTEMPTS = len(all_accounts) * 2  # Full circle with margin
         
+        # Queue system: extract client_id and get orchestrator
+        client_id = request.client.host if request.client else "unknown"
+        queue_orchestrator = getattr(request.app.state, "queue_orchestrator", None)
+        use_queue = QUEUE_ENABLED and queue_orchestrator is not None
+        
         last_error_message = None
         last_error_status = None
         tried_accounts = set()  # Track tried accounts in current failover loop
@@ -426,6 +434,41 @@ async def messages(
                 system_for_tokenizer = request_data.system
             else:
                 system_for_tokenizer = request_data.system
+            
+            # Acquire concurrency slot if queue system is enabled
+            slot_acquired = False
+            if use_queue:
+                assert queue_orchestrator is not None  # narrowing for type checker
+                # Check if queue is full before attempting to acquire
+                if queue_orchestrator._scheduler.is_full():
+                    return JSONResponse(
+                        status_code=503,
+                        content={
+                            "type": "error",
+                            "error": {
+                                "type": "overloaded_error",
+                                "message": "Too many pending requests"
+                            }
+                        }
+                    )
+                try:
+                    acquired = await queue_orchestrator._limiter.acquire(
+                        account.id, timeout=queue_orchestrator._queue_timeout
+                    )
+                except asyncio.TimeoutError:
+                    acquired = False
+                if not acquired:
+                    return JSONResponse(
+                        status_code=503,
+                        content={
+                            "type": "error",
+                            "error": {
+                                "type": "overloaded_error",
+                                "message": "Server busy, please retry later"
+                            }
+                        }
+                    )
+                slot_acquired = True
             
             try:
                 # Make request to Kiro API
@@ -634,6 +677,15 @@ async def messages(
                 if debug_logger:
                     debug_logger.flush_on_error(e.status_code, str(e.detail))
                 raise
+            except AccountRateLimited as e:
+                # Account hit 429 - report rate limit and try next account
+                await http_client.close()
+                await account_manager.report_rate_limit(e.account_id, e.retry_after)
+                tried_accounts.add(e.account_id)
+                last_error_message = f"Account {e.account_id} rate limited"
+                last_error_status = 429
+                logger.warning(f"Account {e.account_id} rate limited (retry_after={e.retry_after}s), trying next")
+                continue
             except Exception as e:
                 await http_client.close()
                 logger.error(f"Internal error: {e}", exc_info=True)
@@ -651,6 +703,11 @@ async def messages(
                         }
                     }
                 )
+            finally:
+                # Release concurrency slot if it was acquired
+                if use_queue and slot_acquired and queue_orchestrator is not None:
+                    queue_orchestrator._limiter.release(account.id)
+                    slot_acquired = False
         
         # All attempts exhausted
         if len(all_accounts) == 1:

@@ -20,8 +20,8 @@
 """
 Exception handlers for Kiro Gateway.
 
-Contains functions for handling validation errors and other exceptions
-in a JSON-serialization compatible format.
+Contains custom exception classes and functions for handling validation errors
+and other exceptions in a JSON-serialization compatible format.
 """
 
 from typing import Any, List, Dict
@@ -30,6 +30,99 @@ from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from loguru import logger
+
+
+class QueueTimeoutError(Exception):
+    """
+    Raised when a request exceeds the maximum wait time in the queue.
+
+    The request was accepted into the queue but no concurrency slot became
+    available before QUEUE_TIMEOUT_SECONDS elapsed. The caller should return
+    HTTP 503 to the client.
+
+    Attributes:
+        wait_time: Actual seconds the request waited before timing out.
+        request_id: Identifier of the timed-out request.
+
+    Example:
+        >>> raise QueueTimeoutError(wait_time=30.1, request_id="abc123")
+    """
+
+    def __init__(self, wait_time: float = 0.0, request_id: str = "") -> None:
+        """
+        Initialize QueueTimeoutError.
+
+        Args:
+            wait_time: Seconds the request waited in the queue.
+            request_id: Identifier of the timed-out request.
+        """
+        self.wait_time = wait_time
+        self.request_id = request_id
+        super().__init__(
+            f"Request '{request_id}' timed out after {wait_time:.1f}s in queue"
+        )
+
+
+class QueueFullError(Exception):
+    """
+    Raised when the queue has reached its maximum capacity and cannot accept new requests.
+
+    The request was rejected immediately without entering the queue because
+    the number of pending requests has reached QUEUE_MAX_SIZE. The caller
+    should return HTTP 503 to the client.
+
+    Attributes:
+        queue_size: Current number of pending requests in the queue.
+        max_size: Maximum allowed queue size.
+
+    Example:
+        >>> raise QueueFullError(queue_size=50, max_size=50)
+    """
+
+    def __init__(self, queue_size: int = 0, max_size: int = 0) -> None:
+        """
+        Initialize QueueFullError.
+
+        Args:
+            queue_size: Current number of pending requests.
+            max_size: Maximum allowed queue size.
+        """
+        self.queue_size = queue_size
+        self.max_size = max_size
+        super().__init__(
+            f"Queue is full ({queue_size}/{max_size}), request rejected"
+        )
+
+
+class AccountRateLimited(Exception):
+    """
+    Raised when an account receives HTTP 429 and should not be retried on the same account.
+
+    This exception signals to the caller (e.g., account manager or route handler)
+    that the current account is rate-limited and a different account should be used
+    instead of retrying the same one.
+
+    Attributes:
+        account_id: Identifier of the rate-limited account (empty string if unknown).
+        retry_after: Seconds to wait before retrying, parsed from Retry-After header
+                     (0.0 if header was absent or unparseable).
+
+    Example:
+        >>> raise AccountRateLimited(account_id="acc_123", retry_after=5.0)
+        >>> # caller catches this and routes to a different account
+    """
+
+    def __init__(self, account_id: str = "", retry_after: float = 0.0) -> None:
+        """
+        Initialize AccountRateLimited exception.
+
+        Args:
+            account_id: Identifier of the rate-limited account.
+            retry_after: Seconds to wait before the account can be used again.
+        """
+        self.account_id = account_id
+        self.retry_after = retry_after
+        super().__init__(f"Account {account_id} rate limited (retry_after={retry_after}s)")
 
 
 def sanitize_validation_errors(errors: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

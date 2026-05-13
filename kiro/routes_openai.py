@@ -52,6 +52,8 @@ from kiro.http_client import KiroHttpClient
 from kiro.utils import generate_conversation_id
 from kiro.config import WEB_SEARCH_ENABLED
 from kiro.mcp_tools import handle_native_web_search
+from kiro.queue_config import QUEUE_ENABLED
+from kiro.exceptions import AccountRateLimited, QueueTimeoutError, QueueFullError
 
 # Import debug_logger
 try:
@@ -274,7 +276,14 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     # Account System: Account System Failover or Legacy Mode
     # ==============================================================================
     
+    # Extract client_id for queue scheduling
+    client_id = request.client.host if request.client else "unknown"
+    
+    # Get queue orchestrator (None if disabled)
+    queue_orchestrator = getattr(request.app.state, 'queue_orchestrator', None)
+    
     if request.app.state.account_system:
+      try:
         # ==============================================================================
         # ACCOUNT SYSTEM ENABLED: Failover Loop
         # ==============================================================================
@@ -354,7 +363,20 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 shared_client = request.app.state.http_client
                 http_client = KiroHttpClient(auth_manager, shared_client=shared_client)
             
+            _slot_acquired = False
             try:
+                # Acquire concurrency slot if queue is enabled
+                if queue_orchestrator and QUEUE_ENABLED:
+                    acquired = await queue_orchestrator._limiter.acquire(
+                        account.id, timeout=queue_orchestrator._queue_timeout
+                    )
+                    if not acquired:
+                        raise QueueTimeoutError(
+                            wait_time=queue_orchestrator._queue_timeout,
+                            request_id=client_id
+                        )
+                    _slot_acquired = True
+                
                 # Make request to Kiro API
                 response = await http_client.request_with_retry(
                     "POST",
@@ -555,6 +577,23 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 if debug_logger:
                     debug_logger.flush_on_error(e.status_code, str(e.detail))
                 raise
+            except AccountRateLimited as e:
+                await http_client.close()
+                # Report rate limit and try next account
+                await account_manager.report_rate_limit(e.account_id, e.retry_after)
+                tried_accounts.add(e.account_id)
+                last_error_message = f"Account {e.account_id} rate limited"
+                last_error_status = 429
+                logger.warning(f"Account {e.account_id} rate limited (retry_after={e.retry_after}s), trying next account")
+                
+                # Single account - no point in failover
+                if len(all_accounts) == 1:
+                    break
+                
+                continue  # Try next account
+            except (QueueTimeoutError, QueueFullError):
+                # Let queue errors propagate to the outer handler
+                raise
             except Exception as e:
                 await http_client.close()
                 logger.error(f"Internal error: {e}", exc_info=True)
@@ -562,6 +601,10 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 if debug_logger:
                     debug_logger.flush_on_error(500, str(e))
                 raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+            finally:
+                # Release concurrency slot if acquired
+                if _slot_acquired:
+                    queue_orchestrator._limiter.release(account.id)
         
         # All attempts exhausted
         if len(all_accounts) == 1:
@@ -577,6 +620,19 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             if last_error_message:
                 detail += f" Last error: {last_error_message}"
             raise HTTPException(status_code=503, detail=detail)
+      
+      except QueueTimeoutError as e:
+        logger.warning(f"Queue timeout for client {client_id}: {e}")
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"message": "Server busy, please retry later", "type": "queue_timeout", "code": 503}}
+        )
+      except QueueFullError as e:
+        logger.warning(f"Queue full for client {client_id}: {e}")
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"message": "Too many pending requests", "type": "queue_full", "code": 503}}
+        )
     
     else:
         # ==============================================================================

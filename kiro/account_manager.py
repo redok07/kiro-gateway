@@ -64,6 +64,7 @@ from kiro.config import (
 from kiro.utils import get_kiro_headers
 from kiro.account_errors import ErrorType
 from kiro.http_client import KiroHttpClient
+from kiro.queue_config import FAST_429_RECOVERY_SECONDS
 
 
 def _format_duration(seconds: float) -> str:
@@ -136,6 +137,8 @@ class Account:
     last_failure_time: float = 0.0
     models_cached_at: float = 0.0
     stats: AccountStats = field(default_factory=AccountStats)
+    active_requests: int = 0
+    last_rate_limit_time: float = 0.0
 
 
 @dataclass
@@ -804,6 +807,9 @@ class AccountManager:
             all_account_ids = list(self._accounts.keys())
         
         # Outside _lock: try each candidate with per-account locks for I/O
+        # Two-pass approach: first try non-rate-limited, then rate-limited as fallback
+        rate_limited_candidates: List[int] = []
+        
         for i in range(len(all_account_ids)):
             current_index = (start_index + i) % len(all_account_ids)
             account_id = all_account_ids[current_index]
@@ -815,6 +821,16 @@ class AccountManager:
                     continue
                 if exclude_accounts and account_id in exclude_accounts:
                     continue
+                
+                # Rate limit check: defer rate-limited accounts to second pass
+                if account.last_rate_limit_time > 0.0:
+                    elapsed_since_rl = time.time() - account.last_rate_limit_time
+                    if elapsed_since_rl < FAST_429_RECOVERY_SECONDS:
+                        rate_limited_candidates.append(current_index)
+                        continue
+                    else:
+                        # Cooldown expired, reset and proceed normally
+                        account.last_rate_limit_time = 0.0
                 
                 # Circuit Breaker check (fast, no I/O)
                 if account.failures > 0:
@@ -881,6 +897,72 @@ class AccountManager:
                 if ROTATION_STRATEGY == "round_robin":
                     self._current_account_index = (current_index + 1) % len(all_account_ids)
                     self._dirty = True
+                return account
+        
+        # Second pass: try rate-limited accounts as last resort
+        for current_index in rate_limited_candidates:
+            account_id = all_account_ids[current_index]
+            
+            async with self._lock:
+                account = self._accounts.get(account_id)
+                if not account:
+                    continue
+                if exclude_accounts and account_id in exclude_accounts:
+                    continue
+                
+                # Skip circuit-broken accounts even in fallback
+                if account.failures > 0:
+                    time_since_failure = time.time() - account.last_failure_time
+                    backoff_multiplier = min(2 ** (account.failures - 1), ACCOUNT_MAX_BACKOFF_MULTIPLIER)
+                    effective_timeout = ACCOUNT_RECOVERY_TIMEOUT * backoff_multiplier
+                    if time_since_failure < effective_timeout:
+                        if random.random() > ACCOUNT_PROBABILISTIC_RETRY_CHANCE:
+                            continue
+                
+                needs_init = account.auth_manager is None
+                needs_refresh = (account.models_cached_at > 0 and
+                               (time.time() - account.models_cached_at) > ACCOUNT_CACHE_TTL)
+            
+            # Network I/O under PER-ACCOUNT lock
+            if needs_init or needs_refresh:
+                account_lock = self._get_account_lock(account_id)
+                async with account_lock:
+                    async with self._lock:
+                        account = self._accounts[account_id]
+                        needs_init = account.auth_manager is None
+                        needs_refresh = (account.models_cached_at > 0 and
+                                       (time.time() - account.models_cached_at) > ACCOUNT_CACHE_TTL)
+                    
+                    if needs_init:
+                        success = await self._initialize_account(account_id)
+                        if not success:
+                            async with self._lock:
+                                account.failures += 1
+                                self._dirty = True
+                            continue
+                    
+                    if needs_refresh:
+                        try:
+                            await self._refresh_account_models(account_id)
+                        except Exception as e:
+                            logger.warning(f"Failed to refresh models for {account_id}: {e}")
+            
+            # Final validation under _lock
+            async with self._lock:
+                account = self._accounts.get(account_id)
+                if not account or account.auth_manager is None:
+                    continue
+                
+                if account.model_resolver:
+                    available_models = account.model_resolver.get_available_models()
+                    if normalized_model not in available_models:
+                        continue
+                
+                # Rate-limited account as last resort
+                if ROTATION_STRATEGY == "round_robin":
+                    self._current_account_index = (current_index + 1) % len(all_account_ids)
+                    self._dirty = True
+                logger.info(f"Using rate-limited account {account_id[:16]}... as last resort")
                 return account
         
         # All accounts unavailable
@@ -988,6 +1070,46 @@ class AccountManager:
             # It only changes on success (GLOBAL sticky behavior)
             # Failover happens through exclude_accounts in get_next_account()
     
+    async def report_rate_limit(self, account_id: str, retry_after: float = 0.0) -> None:
+        """
+        Report 429 rate limit for an account (separate from circuit breaker).
+
+        Unlike report_failure(), this does NOT increment failure count.
+        Account recovers after FAST_429_RECOVERY_SECONDS (default 5s).
+
+        Args:
+            account_id: Account ID that received 429
+            retry_after: Seconds from Retry-After header (0.0 if absent)
+        """
+        async with self._lock:
+            account = self._accounts.get(account_id)
+            if not account:
+                return
+            # Set rate limit time (use retry_after if provided and > FAST_429_RECOVERY_SECONDS)
+            account.last_rate_limit_time = time.time()
+            effective_cooldown = max(FAST_429_RECOVERY_SECONDS, retry_after) if retry_after > 0 else FAST_429_RECOVERY_SECONDS
+            logger.info(f"Account {account_id[:16]}... rate-limited, cooldown={effective_cooldown}s")
+
+    async def is_rate_limited(self, account_id: str) -> bool:
+        """
+        Check if account is currently in 429 cooldown.
+
+        Args:
+            account_id: Account ID to check
+
+        Returns:
+            True if account is within rate limit cooldown, False otherwise
+        """
+        async with self._lock:
+            account = self._accounts.get(account_id)
+            if not account or account.last_rate_limit_time == 0.0:
+                return False
+            elapsed = time.time() - account.last_rate_limit_time
+            if elapsed >= FAST_429_RECOVERY_SECONDS:
+                account.last_rate_limit_time = 0.0  # Reset
+                return False
+            return True
+
     def get_first_account(self) -> Account:
         """
         Get first initialized account (for legacy mode).
@@ -1018,3 +1140,89 @@ class AccountManager:
             if account.model_resolver:
                 all_models.update(account.model_resolver.get_available_models())
         return sorted(all_models)
+
+    # ------------------------------------------------------------------
+    # Concurrency tracking (transient, not persisted to state.json)
+    # ------------------------------------------------------------------
+
+    def get_account_load(self, account_id: str) -> int:
+        """
+        Return the number of active (in-flight) requests for an account.
+
+        Args:
+            account_id: Account ID to query.
+
+        Returns:
+            Current active_requests count, or 0 if account not found.
+        """
+        account = self._accounts.get(account_id)
+        if not account:
+            return 0
+        return account.active_requests
+
+    def get_least_loaded_account(
+        self,
+        model: str,
+        exclude: Optional[set] = None,
+    ) -> Optional[Account]:
+        """
+        Return the account with the fewest active requests that supports *model*.
+
+        Accounts without a model_resolver, or whose resolver does not list
+        *model*, are skipped.  Accounts in *exclude* are also skipped.
+
+        Args:
+            model: Model name to filter by (exact match against resolver list).
+            exclude: Optional set of account IDs to skip.
+
+        Returns:
+            Account with the lowest active_requests, or None if no candidate
+            is available.
+        """
+        candidates = []
+        for account in self._accounts.values():
+            if exclude and account.id in exclude:
+                continue
+            if not account.model_resolver:
+                continue
+            available = account.model_resolver.get_available_models()
+            if model not in available:
+                continue
+            candidates.append(account)
+
+        if not candidates:
+            return None
+
+        return min(candidates, key=lambda a: a.active_requests)
+
+    def increment_active(self, account_id: str) -> None:
+        """
+        Increment the active-request counter for an account.
+
+        A no-op (with a warning) when *account_id* is not found.
+
+        Args:
+            account_id: Account ID whose counter should be incremented.
+        """
+        account = self._accounts.get(account_id)
+        if not account:
+            logger.warning(f"increment_active: account {account_id} not found")
+            return
+        account.active_requests += 1
+        logger.debug(f"Account {account_id} active_requests → {account.active_requests}")
+
+    def decrement_active(self, account_id: str) -> None:
+        """
+        Decrement the active-request counter for an account, floored at 0.
+
+        A no-op (with a warning) when *account_id* is not found.
+
+        Args:
+            account_id: Account ID whose counter should be decremented.
+        """
+        account = self._accounts.get(account_id)
+        if not account:
+            logger.warning(f"decrement_active: account {account_id} not found")
+            return
+        account.active_requests = max(0, account.active_requests - 1)
+        logger.debug(f"Account {account_id} active_requests → {account.active_requests}")
