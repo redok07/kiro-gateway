@@ -804,7 +804,9 @@ def print_startup_banner(host: str, port: int) -> None:
         try:
             print(text)
         except UnicodeEncodeError:
-            print(text.encode("utf-8", errors="replace").decode("ascii", errors="replace"))
+            sys.stdout.buffer.write(text.encode("utf-8", errors="replace"))
+            sys.stdout.buffer.write(b"\n")
+            sys.stdout.buffer.flush()
     
     print()
     _safe_print(f"  {WHITE}{BOLD}\U0001f47b {APP_TITLE} v{APP_VERSION}{RESET}")
