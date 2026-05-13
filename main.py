@@ -799,19 +799,26 @@ def print_startup_banner(host: str, port: int) -> None:
     display_host = "localhost" if host == "0.0.0.0" else host
     url = f"http://{display_host}:{port}"
     
+    # Safe print helper for Windows consoles that can't encode Unicode/emoji
+    def _safe_print(text: str) -> None:
+        try:
+            print(text)
+        except UnicodeEncodeError:
+            print(text.encode("utf-8", errors="replace").decode("ascii", errors="replace"))
+    
     print()
-    print(f"  {WHITE}{BOLD}👻 {APP_TITLE} v{APP_VERSION}{RESET}")
+    _safe_print(f"  {WHITE}{BOLD}\U0001f47b {APP_TITLE} v{APP_VERSION}{RESET}")
     print()
     print(f"  {WHITE}Server running at:{RESET}")
-    print(f"  {GREEN}{BOLD}➜  {url}{RESET}")
+    _safe_print(f"  {GREEN}{BOLD}\u279c  {url}{RESET}")
     print()
     print(f"  {DIM}API Docs:      {url}/docs{RESET}")
     print(f"  {DIM}Health Check:  {url}/health{RESET}")
     print()
-    print(f"  {DIM}{'─' * 48}{RESET}")
-    print(f"  {WHITE}💬 Found a bug? Need help? Have questions?{RESET}")
-    print(f"  {YELLOW}➜  https://github.com/jwadow/kiro-gateway/issues{RESET}")
-    print(f"  {DIM}{'─' * 48}{RESET}")
+    _safe_print(f"  {DIM}{'\u2500' * 48}{RESET}")
+    _safe_print(f"  {WHITE}\U0001f4ac Found a bug? Need help? Have questions?{RESET}")
+    _safe_print(f"  {YELLOW}\u279c  https://github.com/jwadow/kiro-gateway/issues{RESET}")
+    _safe_print(f"  {DIM}{'\u2500' * 48}{RESET}")
     print()
 
 
