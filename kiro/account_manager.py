@@ -139,6 +139,9 @@ class Account:
     stats: AccountStats = field(default_factory=AccountStats)
     active_requests: int = 0
     last_rate_limit_time: float = 0.0
+    disabled: bool = False
+    disabled_reason: Optional[str] = None
+    disabled_at: float = 0.0
 
 
 @dataclass
@@ -354,6 +357,9 @@ class AccountManager:
                     account.failures = data.get("failures", 0)
                     account.last_failure_time = data.get("last_failure_time", 0.0)
                     account.models_cached_at = data.get("models_cached_at", 0.0)
+                    account.disabled = data.get("disabled", False)
+                    account.disabled_reason = data.get("disabled_reason", None)
+                    account.disabled_at = data.get("disabled_at", 0.0)
                     
                     stats_data = data.get("stats", {})
                     account.stats = AccountStats(
@@ -362,6 +368,14 @@ class AccountManager:
                         failed_requests=stats_data.get("failed_requests", 0),
                         credits_used=stats_data.get("credits_used", 0.0)
                     )
+            
+            # Log disabled accounts on startup
+            disabled_accounts = [aid for aid, a in self._accounts.items() if a.disabled]
+            if disabled_accounts:
+                logger.warning(
+                    f"Loaded {len(disabled_accounts)} disabled account(s): "
+                    f"{[a[:16] + '...' for a in disabled_accounts]}"
+                )
             
             logger.info(f"Loaded state: {len(self._model_to_accounts)} model mappings, {len(self._accounts)} accounts")
         
@@ -381,6 +395,9 @@ class AccountManager:
                     "failures": account.failures,
                     "last_failure_time": account.last_failure_time,
                     "models_cached_at": account.models_cached_at,
+                    "disabled": account.disabled,
+                    "disabled_reason": account.disabled_reason,
+                    "disabled_at": account.disabled_at,
                     "stats": {
                         "total_requests": account.stats.total_requests,
                         "successful_requests": account.stats.successful_requests,
@@ -776,6 +793,10 @@ class AccountManager:
                 if exclude_accounts and account_id in exclude_accounts:
                     return None
                 
+                # Disabled accounts are never returned
+                if account.disabled:
+                    return None
+                
                 # Lazy initialization if needed
                 if account.auth_manager is None:
                     success = await self._initialize_account(account_id)
@@ -820,6 +841,8 @@ class AccountManager:
                 if not account:
                     continue
                 if exclude_accounts and account_id in exclude_accounts:
+                    continue
+                if account.disabled:
                     continue
                 
                 # Rate limit check: defer rate-limited accounts to second pass
@@ -908,6 +931,8 @@ class AccountManager:
                 if not account:
                     continue
                 if exclude_accounts and account_id in exclude_accounts:
+                    continue
+                if account.disabled:
                     continue
                 
                 # Skip circuit-broken accounts even in fallback
@@ -1060,6 +1085,19 @@ class AccountManager:
                     f"status={status_code}, reason={reason}, "
                     f"cooldown={_format_duration(effective_timeout)}"
                 )
+                
+                # Permanently disable account on monthly quota exhaustion
+                if reason == "MONTHLY_REQUEST_COUNT":
+                    account.disabled = True
+                    account.disabled_reason = reason
+                    account.disabled_at = time.time()
+                    active_count = sum(1 for a in self._accounts.values() if not a.disabled)
+                    logger.warning(
+                        f"Account {account_id[:16]}... DISABLED: monthly quota exhausted. "
+                        f"Active accounts remaining: {active_count}/{len(self._accounts)}"
+                    )
+                    if active_count == 0:
+                        logger.error("ALL accounts disabled! No accounts available for requests.")
             
             # Update stats
             account.stats.total_requests += 1
@@ -1089,6 +1127,39 @@ class AccountManager:
             account.last_rate_limit_time = time.time()
             effective_cooldown = max(FAST_429_RECOVERY_SECONDS, retry_after) if retry_after > 0 else FAST_429_RECOVERY_SECONDS
             logger.info(f"Account {account_id[:16]}... rate-limited, cooldown={effective_cooldown}s")
+
+    async def disable_account(self, account_id: str, reason: str) -> None:
+        """
+        Permanently disable an account (until service restart).
+
+        Used when an account hits a hard limit like MONTHLY_REQUEST_COUNT
+        that won't recover within the current billing cycle.
+
+        Args:
+            account_id: Account ID to disable
+            reason: Human-readable reason for disabling (e.g., "MONTHLY_REQUEST_COUNT")
+        """
+        async with self._lock:
+            account = self._accounts.get(account_id)
+            if not account:
+                return
+            if account.disabled:
+                return  # Already disabled
+
+            account.disabled = True
+            account.disabled_reason = reason
+            account.disabled_at = time.time()
+            self._dirty = True
+
+            # Count remaining active accounts
+            active_count = sum(1 for a in self._accounts.values() if not a.disabled)
+            logger.warning(
+                f"Account {account_id[:16]}... DISABLED: {reason}. "
+                f"Active accounts remaining: {active_count}/{len(self._accounts)}"
+            )
+
+            if active_count == 0:
+                logger.error("ALL accounts disabled! No accounts available for requests.")
 
     async def is_rate_limited(self, account_id: str) -> bool:
         """

@@ -1760,3 +1760,305 @@ class TestBackgroundRefresh:
         assert all(not held for held in lock_states), (
             "Manager lock was held during force_refresh() — potential deadlock risk"
         )
+
+
+# =============================================================================
+# TestAccountDisable
+# =============================================================================
+
+class TestAccountDisable:
+    """
+    Tests for account disable on MONTHLY_REQUEST_COUNT.
+
+    When an account hits monthly quota, it should be permanently disabled
+    (until service restart) and skipped in all subsequent get_next_account() calls.
+    """
+
+    @pytest.mark.asyncio
+    async def test_report_failure_disables_on_monthly_quota(self, tmp_path):
+        """
+        Test that report_failure with reason=MONTHLY_REQUEST_COUNT disables the account.
+
+        What it does: Calls report_failure with MONTHLY_REQUEST_COUNT reason
+        Purpose: Verify account gets disabled flag set
+        """
+        print("\n=== Test: report_failure disables on MONTHLY_REQUEST_COUNT ===")
+
+        # Arrange
+        manager = _make_manager_with_accounts(tmp_path, ["account_A", "account_B"])
+
+        # Act
+        await manager.report_failure(
+            "account_A", "claude-opus-4.5", ErrorType.RECOVERABLE,
+            402, "MONTHLY_REQUEST_COUNT"
+        )
+
+        # Assert
+        account_a = manager._accounts["account_A"]
+        print(f"Account A disabled: {account_a.disabled}")
+        print(f"Account A disabled_reason: {account_a.disabled_reason}")
+        print(f"Account A disabled_at: {account_a.disabled_at}")
+
+        assert account_a.disabled is True
+        assert account_a.disabled_reason == "MONTHLY_REQUEST_COUNT"
+        assert account_a.disabled_at > 0
+
+    @pytest.mark.asyncio
+    async def test_report_failure_does_not_disable_on_other_reasons(self, tmp_path):
+        """
+        Test that report_failure with other reasons does NOT disable the account.
+
+        What it does: Calls report_failure with a non-quota reason
+        Purpose: Verify only MONTHLY_REQUEST_COUNT triggers disable
+        """
+        print("\n=== Test: report_failure does NOT disable on other reasons ===")
+
+        # Arrange
+        manager = _make_manager_with_accounts(tmp_path, ["account_A"])
+
+        # Act
+        await manager.report_failure(
+            "account_A", "claude-opus-4.5", ErrorType.RECOVERABLE,
+            403, "TOKEN_EXPIRED"
+        )
+
+        # Assert
+        account_a = manager._accounts["account_A"]
+        print(f"Account A disabled: {account_a.disabled}")
+        assert account_a.disabled is False
+        assert account_a.disabled_reason is None
+
+    @pytest.mark.asyncio
+    @patch("kiro.account_manager.ROTATION_STRATEGY", "round_robin")
+    async def test_get_next_account_skips_disabled_multi_account(self, tmp_path):
+        """
+        Test that get_next_account skips disabled accounts in multi-account mode.
+
+        What it does: Disables account_A, verifies only account_B is returned
+        Purpose: Ensure disabled accounts are never selected
+        """
+        print("\n=== Test: get_next_account skips disabled (multi-account) ===")
+
+        # Arrange
+        manager = _make_manager_with_accounts(tmp_path, ["account_A", "account_B"])
+        manager._accounts["account_A"].disabled = True
+        manager._accounts["account_A"].disabled_reason = "MONTHLY_REQUEST_COUNT"
+
+        # Act - call multiple times to ensure A is never returned
+        results = []
+        for _ in range(5):
+            account = await manager.get_next_account("claude-opus-4.5")
+            results.append(account.id if account else None)
+
+        # Assert
+        print(f"Results: {results}")
+        assert all(r == "account_B" for r in results)
+
+    @pytest.mark.asyncio
+    async def test_get_next_account_returns_none_when_single_account_disabled(self, tmp_path):
+        """
+        Test that get_next_account returns None when the only account is disabled.
+
+        What it does: Disables the single account, verifies None is returned
+        Purpose: Ensure disabled single account is not bypassed
+        """
+        print("\n=== Test: get_next_account returns None when single account disabled ===")
+
+        # Arrange
+        manager = _make_manager_with_accounts(tmp_path, ["account_A"])
+        manager._accounts["account_A"].disabled = True
+        manager._accounts["account_A"].disabled_reason = "MONTHLY_REQUEST_COUNT"
+
+        # Act
+        result = await manager.get_next_account("claude-opus-4.5")
+
+        # Assert
+        print(f"Result: {result}")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_next_account_returns_none_when_all_disabled(self, tmp_path):
+        """
+        Test that get_next_account returns None when all accounts are disabled.
+
+        What it does: Disables all accounts, verifies None is returned
+        Purpose: Ensure no account is returned when all are exhausted
+        """
+        print("\n=== Test: get_next_account returns None when all disabled ===")
+
+        # Arrange
+        manager = _make_manager_with_accounts(tmp_path, ["account_A", "account_B", "account_C"])
+        for aid in ["account_A", "account_B", "account_C"]:
+            manager._accounts[aid].disabled = True
+            manager._accounts[aid].disabled_reason = "MONTHLY_REQUEST_COUNT"
+
+        # Act
+        result = await manager.get_next_account("claude-opus-4.5")
+
+        # Assert
+        print(f"Result: {result}")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_disable_account_method(self, tmp_path):
+        """
+        Test the disable_account() public method.
+
+        What it does: Calls disable_account directly
+        Purpose: Verify the method sets all fields correctly
+        """
+        print("\n=== Test: disable_account() method ===")
+
+        # Arrange
+        manager = _make_manager_with_accounts(tmp_path, ["account_A", "account_B"])
+
+        # Act
+        await manager.disable_account("account_A", "MONTHLY_REQUEST_COUNT")
+
+        # Assert
+        account_a = manager._accounts["account_A"]
+        assert account_a.disabled is True
+        assert account_a.disabled_reason == "MONTHLY_REQUEST_COUNT"
+        assert account_a.disabled_at > 0
+
+    @pytest.mark.asyncio
+    async def test_disable_account_idempotent(self, tmp_path):
+        """
+        Test that calling disable_account twice doesn't change state.
+
+        What it does: Calls disable_account twice on same account
+        Purpose: Verify idempotency (disabled_at doesn't change)
+        """
+        print("\n=== Test: disable_account is idempotent ===")
+
+        # Arrange
+        manager = _make_manager_with_accounts(tmp_path, ["account_A"])
+        await manager.disable_account("account_A", "MONTHLY_REQUEST_COUNT")
+        first_disabled_at = manager._accounts["account_A"].disabled_at
+
+        # Act
+        await manager.disable_account("account_A", "SOMETHING_ELSE")
+
+        # Assert - disabled_at should not change (early return)
+        account_a = manager._accounts["account_A"]
+        assert account_a.disabled_at == first_disabled_at
+        assert account_a.disabled_reason == "MONTHLY_REQUEST_COUNT"  # Original reason preserved
+
+    @pytest.mark.asyncio
+    async def test_disabled_state_persisted_in_save_state(self, tmp_path):
+        """
+        Test that disabled state is saved to state.json.
+
+        What it does: Disables account, saves state, reads JSON
+        Purpose: Verify persistence includes disabled fields
+        """
+        print("\n=== Test: disabled state persisted in save_state ===")
+
+        # Arrange
+        manager = _make_manager_with_accounts(tmp_path, ["account_A"])
+        manager._accounts["account_A"].disabled = True
+        manager._accounts["account_A"].disabled_reason = "MONTHLY_REQUEST_COUNT"
+        manager._accounts["account_A"].disabled_at = 1700000000.0
+
+        # Act
+        await manager._save_state()
+
+        # Assert
+        state_path = tmp_path / "state.json"
+        state_data = json.loads(state_path.read_text())
+        account_state = state_data["accounts"]["account_A"]
+
+        print(f"Saved state: {account_state}")
+        assert account_state["disabled"] is True
+        assert account_state["disabled_reason"] == "MONTHLY_REQUEST_COUNT"
+        assert account_state["disabled_at"] == 1700000000.0
+
+    @pytest.mark.asyncio
+    async def test_disabled_state_restored_in_load_state(self, tmp_path):
+        """
+        Test that disabled state is restored from state.json.
+
+        What it does: Writes state.json with disabled=True, loads it
+        Purpose: Verify persistence round-trip
+        """
+        print("\n=== Test: disabled state restored in load_state ===")
+
+        # Arrange
+        manager = _make_manager_with_accounts(tmp_path, ["account_A"])
+        state_data = {
+            "current_account_index": 0,
+            "accounts": {
+                "account_A": {
+                    "failures": 1,
+                    "last_failure_time": 1700000000.0,
+                    "models_cached_at": 1700000000.0,
+                    "disabled": True,
+                    "disabled_reason": "MONTHLY_REQUEST_COUNT",
+                    "disabled_at": 1700000000.0,
+                    "stats": {
+                        "total_requests": 10,
+                        "successful_requests": 9,
+                        "failed_requests": 1,
+                        "credits_used": 0.5
+                    }
+                }
+            },
+            "model_to_accounts": {}
+        }
+        state_path = tmp_path / "state.json"
+        state_path.write_text(json.dumps(state_data))
+
+        # Act
+        await manager.load_state()
+
+        # Assert
+        account_a = manager._accounts["account_A"]
+        print(f"Loaded disabled: {account_a.disabled}")
+        print(f"Loaded disabled_reason: {account_a.disabled_reason}")
+        print(f"Loaded disabled_at: {account_a.disabled_at}")
+
+        assert account_a.disabled is True
+        assert account_a.disabled_reason == "MONTHLY_REQUEST_COUNT"
+        assert account_a.disabled_at == 1700000000.0
+
+    @pytest.mark.asyncio
+    async def test_disabled_state_defaults_false_when_missing_from_state(self, tmp_path):
+        """
+        Test backward compatibility: old state.json without disabled fields.
+
+        What it does: Loads state.json without disabled fields
+        Purpose: Verify graceful handling of missing fields (defaults to False)
+        """
+        print("\n=== Test: disabled defaults to False when missing from state ===")
+
+        # Arrange
+        manager = _make_manager_with_accounts(tmp_path, ["account_A"])
+        state_data = {
+            "current_account_index": 0,
+            "accounts": {
+                "account_A": {
+                    "failures": 0,
+                    "last_failure_time": 0.0,
+                    "models_cached_at": 0.0,
+                    "stats": {
+                        "total_requests": 5,
+                        "successful_requests": 5,
+                        "failed_requests": 0,
+                        "credits_used": 0.0
+                    }
+                }
+            },
+            "model_to_accounts": {}
+        }
+        state_path = tmp_path / "state.json"
+        state_path.write_text(json.dumps(state_data))
+
+        # Act
+        await manager.load_state()
+
+        # Assert
+        account_a = manager._accounts["account_A"]
+        print(f"Loaded disabled: {account_a.disabled}")
+        assert account_a.disabled is False
+        assert account_a.disabled_reason is None
+        assert account_a.disabled_at == 0.0
