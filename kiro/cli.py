@@ -365,6 +365,7 @@ def show_account_menu() -> None:
     print()
     print(f"  {CYAN}L{RESET}  Login (single account - Google OAuth)")
     print(f"  {CYAN}B{RESET}  Batch Login (multiple accounts from config)")
+    print(f"  {CYAN}Q{RESET}  Check quotas (fetch live usage from Kiro API)")
     print(f"  {CYAN}T{RESET}  Test connection")
     print(f"  {CYAN}0{RESET}  Back to main menu")
     print()
@@ -380,6 +381,9 @@ def show_account_menu() -> None:
     elif choice == "b":
         print()
         run_batch_login_flow()
+    elif choice == "q":
+        print()
+        _refresh_quotas(ACCOUNTS_CONFIG_FILE)
     elif choice == "t":
         print()
         test_connection()
@@ -414,9 +418,6 @@ def _show_accounts_list(config_path: str) -> None:
         print(f"  {RED}Error reading credentials.json: {e}{RESET}")
         return
 
-    # Load state.json for credits data
-    account_stats = _load_account_stats_from_state()
-
     print()
     print(f"  {WHITE}Accounts ({len(accounts)}):{RESET}")
 
@@ -442,15 +443,246 @@ def _show_accounts_list(config_path: str) -> None:
         # Check if credential file exists and token status
         status = _get_account_status(entry_path)
 
-        # Get credits from state
-        credits_str = ""
-        if entry_path and entry_path in account_stats:
-            credits = account_stats[entry_path].get("credits_used", 0.0)
-            if credits > 0:
-                credits_str = f"  {YELLOW}credits: {credits:.2f}{RESET}"
+        # Get quota from cache
+        quota_str = ""
+        quota_cache = _load_quota_cache()
+        if entry_path and entry_path in quota_cache:
+            qc = quota_cache[entry_path]
+            total = int(qc.get("totalCredits", 0))
+            used = int(qc.get("usedCredits", 0))
+            remaining = int(qc.get("remainingCredits", 0))
+            pkg = qc.get("packageName", "")
+            if total > 0:
+                if remaining <= 0:
+                    color = RED
+                elif remaining < total * 0.2:
+                    color = YELLOW
+                else:
+                    color = GREEN
+                quota_str = f"  {color}{pkg} {used}/{total}{RESET}"
 
         print(f"    {CYAN}{i}.{RESET} {WHITE}{alias or 'unnamed'}{RESET}"
-              f"  {DIM}({entry_type}){RESET}  {status}{credits_str}")
+              f"  {DIM}({entry_type}){RESET}  {status}{quota_str}")
+
+
+def _load_quota_cache() -> dict:
+    """Load cached quota data from state.json.
+
+    Returns:
+        Dict mapping account path to quota info (totalCredits, usedCredits, etc.)
+    """
+    import json
+    from pathlib import Path
+    from kiro.config import ACCOUNTS_STATE_FILE
+
+    state_path = Path(ACCOUNTS_STATE_FILE)
+    if not state_path.exists():
+        return {}
+
+    try:
+        state_data = json.loads(state_path.read_text(encoding="utf-8"))
+        return state_data.get("quota_cache", {})
+    except Exception:
+        return {}
+
+
+def _refresh_quotas(config_path: str) -> None:
+    """Fetch live quota from Kiro API for all accounts and cache results."""
+    import json
+    import asyncio
+    import ssl
+    from pathlib import Path
+    from urllib.parse import quote
+
+    try:
+        import aiohttp
+    except ImportError:
+        print(f"  {RED}aiohttp not installed. Run: pip install aiohttp{RESET}")
+        return
+
+    from kiro.config import ACCOUNTS_STATE_FILE, PROFILE_ARN
+
+    KIRO_USAGE_ENDPOINT = "https://q.us-east-1.amazonaws.com/getUsageLimits"
+
+    path = Path(config_path)
+    if not path.is_absolute():
+        candidates = [
+            Path.cwd() / path,
+            GATEWAY_ROOT / path,
+            DATA_DIR / path,
+        ]
+        path = next((p for p in candidates if p.exists()), GATEWAY_ROOT / path)
+
+    if not path.exists():
+        print(f"  {RED}No credentials.json found at {path}{RESET}")
+        return
+
+    try:
+        accounts = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(accounts, list) or not accounts:
+            print(f"  {DIM}No accounts in credentials.json{RESET}")
+            return
+    except Exception as e:
+        print(f"  {RED}Error reading credentials.json: {e}{RESET}")
+        return
+
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+
+    async def fetch_single(session: "aiohttp.ClientSession", entry: dict) -> dict:
+        """Fetch quota for a single account."""
+        entry_path = entry.get("path", "")
+        if not entry_path:
+            return {"_ok": False, "_error": "no path"}
+
+        cred_path = Path(entry_path)
+        if not cred_path.exists():
+            return {"_ok": False, "_error": "file missing"}
+
+        try:
+            cred_data = json.loads(cred_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {"_ok": False, "_error": "cannot read cred file"}
+
+        access_token = cred_data.get("accessToken", "")
+        if not access_token:
+            return {"_ok": False, "_error": "no accessToken"}
+
+        params = ["origin=AI_EDITOR", "resourceType=AGENTIC_REQUEST"]
+        if PROFILE_ARN:
+            params.append(f"profileArn={quote(PROFILE_ARN, safe='')}")
+        url = KIRO_USAGE_ENDPOINT + "?" + "&".join(params)
+
+        try:
+            async with session.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "kiro-ide/1.0.0",
+                },
+                ssl=ssl_ctx,
+            ) as resp:
+                if resp.status != 200:
+                    return {"_ok": False, "_http_status": resp.status}
+                payload = await resp.json()
+                return _parse_quota_response(payload)
+        except Exception as exc:
+            return {"_ok": False, "_error": str(exc)}
+
+    async def fetch_all():
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            tasks = [fetch_single(session, entry) for entry in accounts]
+            return await asyncio.gather(*tasks)
+
+    print(f"  {DIM}Fetching quotas for {len(accounts)} accounts...{RESET}")
+    results = asyncio.run(fetch_all())
+
+    # Load existing state
+    state_path = Path(ACCOUNTS_STATE_FILE)
+    state_data = {}
+    if state_path.exists():
+        try:
+            state_data = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            state_data = {}
+
+    if "quota_cache" not in state_data:
+        state_data["quota_cache"] = {}
+
+    import time as _time
+    now = _time.time()
+
+    success_count = 0
+    fail_count = 0
+
+    print()
+    for i, (entry, result) in enumerate(zip(accounts, results), 1):
+        entry_path = entry.get("path", "")
+        comment = entry.get("comment", "")
+        alias = ""
+        if "alias=" in comment:
+            alias = comment.split("alias=")[-1].rstrip(")")
+        if not alias and entry_path:
+            alias = Path(entry_path).stem.replace("kiro-auto-", "")
+
+        if result.get("_ok"):
+            success_count += 1
+            total = int(result["totalCredits"])
+            used = int(result["usedCredits"])
+            remaining = int(result["remainingCredits"])
+            pkg = result.get("packageName", "Free")
+
+            # Color based on remaining
+            if remaining <= 0:
+                color = RED
+            elif remaining < total * 0.2:
+                color = YELLOW
+            else:
+                color = GREEN
+
+            print(f"    {CYAN}{i}.{RESET} {WHITE}{alias}{RESET}  "
+                  f"{color}{pkg} {used}/{total}{RESET}")
+
+            # Cache
+            state_data["quota_cache"][entry_path] = {
+                "totalCredits": total,
+                "usedCredits": used,
+                "remainingCredits": remaining,
+                "packageName": pkg,
+                "lastFetched": now,
+            }
+        else:
+            fail_count += 1
+            err = result.get("_error", f"HTTP {result.get('_http_status', '?')}")
+            print(f"    {CYAN}{i}.{RESET} {WHITE}{alias}{RESET}  {RED}{err}{RESET}")
+
+    # Save state
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"\n  {RED}Failed to save quota cache: {e}{RESET}")
+
+    print(f"\n  {GREEN}Done:{RESET} {success_count} OK, {fail_count} failed")
+
+
+def _parse_quota_response(payload: dict) -> dict:
+    """Parse Kiro usage API response into quota dict."""
+    usage_list = payload.get("usageBreakdownList") or []
+    if not usage_list:
+        return {"_ok": True, "totalCredits": 0, "usedCredits": 0,
+                "remainingCredits": 0, "packageName": "Free"}
+    usage = usage_list[0] or {}
+    total = float(usage.get("usageLimit") or usage.get("usageLimitWithPrecision") or 0)
+    used = float(usage.get("currentUsage") or usage.get("currentUsageWithPrecision") or 0)
+
+    ft = usage.get("freeTrialInfo") or {}
+    if str(ft.get("freeTrialStatus") or "").upper() == "ACTIVE":
+        total += float(ft.get("usageLimit") or ft.get("usageLimitWithPrecision") or 0)
+        used += float(ft.get("currentUsage") or ft.get("currentUsageWithPrecision") or 0)
+
+    for bonus in usage.get("bonuses") or []:
+        total += float((bonus or {}).get("usageLimit") or 0)
+        used += float((bonus or {}).get("currentUsage") or 0)
+
+    remaining = max(total - used, 0)
+    sub_title = str(
+        payload.get("subscriptionInfo", {}).get("subscriptionTitle")
+        or payload.get("subscriptionTitle")
+        or payload.get("subscriptionType")
+        or "Free"
+    ).strip()
+
+    return {
+        "_ok": True,
+        "totalCredits": total,
+        "usedCredits": used,
+        "remainingCredits": remaining,
+        "packageName": sub_title,
+    }
 
 
 def _load_account_stats_from_state() -> dict:

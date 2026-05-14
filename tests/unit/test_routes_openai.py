@@ -1999,3 +1999,355 @@ class TestChatCompletionsLegacyMode:
         
         assert failover_enabled is False
         print("✅ Legacy mode correctly skips failover loop")
+
+
+# =============================================================================
+# Tests for /accounts/quota endpoint
+# =============================================================================
+
+class TestAccountsQuotaEndpoint:
+    """Tests for the GET /accounts/quota endpoint."""
+
+    def test_missing_key_returns_401(self, test_client):
+        """
+        What it does: Verifies that missing key param returns 401.
+        Purpose: Ensure endpoint requires authentication.
+        """
+        print("Action: GET /accounts/quota without key...")
+        response = test_client.get("/accounts/quota")
+
+        print(f"Result: status={response.status_code}")
+        assert response.status_code == 401
+        assert "Invalid or missing key" in response.json()["detail"]
+
+    def test_wrong_key_returns_401(self, test_client):
+        """
+        What it does: Verifies that wrong key param returns 401.
+        Purpose: Ensure invalid keys are rejected.
+        """
+        print("Action: GET /accounts/quota with wrong key...")
+        response = test_client.get("/accounts/quota?key=wrong_key_123")
+
+        print(f"Result: status={response.status_code}")
+        assert response.status_code == 401
+        assert "Invalid or missing key" in response.json()["detail"]
+
+    def test_empty_key_returns_401(self, test_client):
+        """
+        What it does: Verifies that empty key param returns 401.
+        Purpose: Ensure empty string key is rejected.
+        """
+        print("Action: GET /accounts/quota with empty key...")
+        response = test_client.get("/accounts/quota?key=")
+
+        print(f"Result: status={response.status_code}")
+        assert response.status_code == 401
+
+    def test_valid_key_returns_200(self, test_client):
+        """
+        What it does: Verifies that valid key returns account quota info.
+        Purpose: Ensure authenticated access works.
+        """
+        print(f"Action: GET /accounts/quota with valid key...")
+        response = test_client.get(f"/accounts/quota?key={PROXY_API_KEY}")
+
+        print(f"Result: status={response.status_code}, body={response.json()}")
+        assert response.status_code == 200
+        data = response.json()
+        assert "total_accounts" in data
+        assert "active_accounts" in data
+        assert "disabled_accounts" in data
+        assert "accounts" in data
+        assert "summary" in data
+        assert "timestamp" in data
+
+    def test_response_structure_has_correct_fields(self, test_client):
+        """
+        What it does: Verifies response structure matches expected schema.
+        Purpose: Ensure API contract is correct.
+        """
+        print("Action: GET /accounts/quota with valid key...")
+        response = test_client.get(f"/accounts/quota?key={PROXY_API_KEY}")
+
+        assert response.status_code == 200
+        data = response.json()
+
+        # Top-level fields
+        assert isinstance(data["total_accounts"], int)
+        assert isinstance(data["active_accounts"], int)
+        assert isinstance(data["disabled_accounts"], int)
+        assert isinstance(data["accounts"], list)
+        assert isinstance(data["summary"], dict)
+        assert "total_remaining" in data["summary"]
+        assert "total_limit" in data["summary"]
+
+    def test_account_entry_has_required_fields(self, test_client):
+        """
+        What it does: Verifies each account entry has required fields.
+        Purpose: Ensure per-account data is complete.
+        """
+        print("Action: GET /accounts/quota with valid key...")
+        response = test_client.get(f"/accounts/quota?key={PROXY_API_KEY}")
+
+        assert response.status_code == 200
+        data = response.json()
+
+        if data["accounts"]:
+            account = data["accounts"][0]
+            assert "id" in account
+            assert "status" in account
+            assert account["status"] in ("active", "disabled")
+            assert "failures" in account
+            assert "total_requests" in account
+            assert "successful_requests" in account
+            assert "failed_requests" in account
+
+    def test_disabled_account_has_reason(self, test_client):
+        """
+        What it does: Verifies disabled accounts include reason and timestamp.
+        Purpose: Ensure disabled state is properly reported.
+        """
+        print("Action: Disabling an account then checking quota...")
+
+        # Get account manager and disable first account
+        from main import app
+        account_manager = app.state.account_manager
+        accounts = list(account_manager._accounts.values())
+
+        if not accounts:
+            pytest.skip("No accounts available in test environment")
+
+        # Disable first account
+        first_account = accounts[0]
+        first_account.disabled = True
+        first_account.disabled_reason = "MONTHLY_REQUEST_COUNT"
+        first_account.disabled_at = time.time()
+
+        try:
+            response = test_client.get(f"/accounts/quota?key={PROXY_API_KEY}")
+            assert response.status_code == 200
+            data = response.json()
+
+            assert data["disabled_accounts"] >= 1
+
+            # Find the disabled account
+            disabled = [a for a in data["accounts"] if a["status"] == "disabled"]
+            assert len(disabled) >= 1
+            assert disabled[0]["disabled_reason"] == "MONTHLY_REQUEST_COUNT"
+            assert "disabled_at" in disabled[0]
+        finally:
+            # Restore
+            first_account.disabled = False
+            first_account.disabled_reason = None
+            first_account.disabled_at = 0.0
+
+    def test_active_disabled_counts_sum_to_total(self, test_client):
+        """
+        What it does: Verifies active + disabled = total.
+        Purpose: Ensure accounting is consistent.
+        """
+        print("Action: GET /accounts/quota...")
+        response = test_client.get(f"/accounts/quota?key={PROXY_API_KEY}")
+
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["active_accounts"] + data["disabled_accounts"] == data["total_accounts"]
+
+    def test_no_auth_header_required(self, test_client):
+        """
+        What it does: Verifies endpoint uses query param, not header auth.
+        Purpose: Ensure browser-friendly access works.
+        """
+        print("Action: GET /accounts/quota with key in query, no auth header...")
+        response = test_client.get(
+            f"/accounts/quota?key={PROXY_API_KEY}",
+            headers={}  # No Authorization header
+        )
+
+        assert response.status_code == 200
+
+
+class TestParseQuotaForEndpoint:
+    """Tests for the _parse_quota_for_endpoint helper function."""
+
+    def test_empty_usage_list(self):
+        """
+        What it does: Verifies empty payload returns zero quota.
+        Purpose: Handle accounts with no usage data.
+        """
+        from kiro.routes_openai import _parse_quota_for_endpoint
+
+        result = _parse_quota_for_endpoint({})
+        assert result["totalCredits"] == 0
+        assert result["usedCredits"] == 0
+        assert result["remainingCredits"] == 0
+        assert result["packageName"] == "Free"
+
+    def test_pro_account_quota(self):
+        """
+        What it does: Verifies Pro account quota parsing.
+        Purpose: Ensure standard Pro response is parsed correctly.
+        """
+        from kiro.routes_openai import _parse_quota_for_endpoint
+
+        payload = {
+            "usageBreakdownList": [{
+                "usageLimit": 1000,
+                "currentUsage": 200,
+            }],
+            "subscriptionInfo": {"subscriptionTitle": "Kiro Pro"}
+        }
+        result = _parse_quota_for_endpoint(payload)
+        assert result["totalCredits"] == 1000
+        assert result["usedCredits"] == 200
+        assert result["remainingCredits"] == 800
+        assert result["packageName"] == "Kiro Pro"
+
+    def test_free_trial_adds_to_total(self):
+        """
+        What it does: Verifies free trial bonus is added to totals.
+        Purpose: Ensure free trial credits are counted.
+        """
+        from kiro.routes_openai import _parse_quota_for_endpoint
+
+        payload = {
+            "usageBreakdownList": [{
+                "usageLimit": 50,
+                "currentUsage": 10,
+                "freeTrialInfo": {
+                    "freeTrialStatus": "ACTIVE",
+                    "usageLimit": 100,
+                    "currentUsage": 20,
+                }
+            }],
+            "subscriptionType": "Free"
+        }
+        result = _parse_quota_for_endpoint(payload)
+        assert result["totalCredits"] == 150  # 50 + 100
+        assert result["usedCredits"] == 30  # 10 + 20
+        assert result["remainingCredits"] == 120
+
+    def test_bonuses_add_to_total(self):
+        """
+        What it does: Verifies bonus credits are added.
+        Purpose: Ensure promotional bonuses are counted.
+        """
+        from kiro.routes_openai import _parse_quota_for_endpoint
+
+        payload = {
+            "usageBreakdownList": [{
+                "usageLimit": 1000,
+                "currentUsage": 500,
+                "bonuses": [
+                    {"usageLimit": 200, "currentUsage": 50},
+                    {"usageLimit": 100, "currentUsage": 25},
+                ]
+            }],
+            "subscriptionInfo": {"subscriptionTitle": "Kiro Pro"}
+        }
+        result = _parse_quota_for_endpoint(payload)
+        assert result["totalCredits"] == 1300  # 1000 + 200 + 100
+        assert result["usedCredits"] == 575  # 500 + 50 + 25
+        assert result["remainingCredits"] == 725
+
+    def test_remaining_never_negative(self):
+        """
+        What it does: Verifies remaining is floored at 0.
+        Purpose: Prevent negative remaining when over-quota.
+        """
+        from kiro.routes_openai import _parse_quota_for_endpoint
+
+        payload = {
+            "usageBreakdownList": [{
+                "usageLimit": 100,
+                "currentUsage": 150,  # Over limit
+            }],
+            "subscriptionInfo": {"subscriptionTitle": "Kiro Pro"}
+        }
+        result = _parse_quota_for_endpoint(payload)
+        assert result["remainingCredits"] == 0
+
+    def test_precision_fields_used_as_fallback(self):
+        """
+        What it does: Verifies WithPrecision fields are used when primary fields are missing.
+        Purpose: Handle API response variations.
+        """
+        from kiro.routes_openai import _parse_quota_for_endpoint
+
+        payload = {
+            "usageBreakdownList": [{
+                "usageLimitWithPrecision": 1000.5,
+                "currentUsageWithPrecision": 200.3,
+            }],
+            "subscriptionTitle": "Kiro Pro"
+        }
+        result = _parse_quota_for_endpoint(payload)
+        assert result["totalCredits"] == 1000.5
+        assert result["usedCredits"] == 200.3
+
+
+class TestLoadQuotaCacheForEndpoint:
+    """Tests for the _load_quota_cache_for_endpoint helper function."""
+
+    def test_returns_empty_when_no_state_file(self, tmp_path):
+        """
+        What it does: Verifies empty dict when state.json doesn't exist.
+        Purpose: Handle fresh installations gracefully.
+        """
+        from kiro.routes_openai import _load_quota_cache_for_endpoint
+
+        with patch("kiro.routes_openai.ACCOUNTS_STATE_FILE", str(tmp_path / "nonexistent.json")):
+            result = _load_quota_cache_for_endpoint()
+            assert result == {}
+
+    def test_returns_empty_when_no_quota_cache_key(self, tmp_path):
+        """
+        What it does: Verifies empty dict when state.json has no quota_cache.
+        Purpose: Handle state files without quota data.
+        """
+        from kiro.routes_openai import _load_quota_cache_for_endpoint
+
+        state_file = tmp_path / "state.json"
+        state_file.write_text(json.dumps({"accounts": {}}))
+
+        with patch("kiro.routes_openai.ACCOUNTS_STATE_FILE", str(state_file)):
+            result = _load_quota_cache_for_endpoint()
+            assert result == {}
+
+    def test_returns_cached_quota_data(self, tmp_path):
+        """
+        What it does: Verifies cached quota data is returned correctly.
+        Purpose: Ensure cache reading works.
+        """
+        from kiro.routes_openai import _load_quota_cache_for_endpoint
+
+        state_file = tmp_path / "state.json"
+        cache_data = {
+            "/path/to/creds.json": {
+                "totalCredits": 1000,
+                "usedCredits": 200,
+                "remainingCredits": 800,
+                "packageName": "Kiro Pro",
+                "lastFetched": "2026-05-15T10:00:00Z"
+            }
+        }
+        state_file.write_text(json.dumps({"quota_cache": cache_data}))
+
+        with patch("kiro.routes_openai.ACCOUNTS_STATE_FILE", str(state_file)):
+            result = _load_quota_cache_for_endpoint()
+            assert result == cache_data
+
+    def test_returns_empty_on_corrupt_json(self, tmp_path):
+        """
+        What it does: Verifies graceful handling of corrupt state.json.
+        Purpose: Prevent crashes on file corruption.
+        """
+        from kiro.routes_openai import _load_quota_cache_for_endpoint
+
+        state_file = tmp_path / "state.json"
+        state_file.write_text("not valid json {{{")
+
+        with patch("kiro.routes_openai.ACCOUNTS_STATE_FILE", str(state_file)):
+            result = _load_quota_cache_for_endpoint()
+            assert result == {}

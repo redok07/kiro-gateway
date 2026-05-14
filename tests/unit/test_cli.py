@@ -264,3 +264,213 @@ class TestShowStatus:
 
             captured = capsys.readouterr()
             assert "stopped" in captured.out.lower() or "STOPPED" in captured.out or "not running" in captured.out.lower()
+
+
+class TestLoadQuotaCache:
+    """Tests for _load_quota_cache() function."""
+
+    def test_returns_empty_dict_when_no_state_file(self, tmp_path, monkeypatch):
+        """Returns empty dict when state.json doesn't exist."""
+        monkeypatch.setattr("kiro.config.ACCOUNTS_STATE_FILE", str(tmp_path / "nonexistent.json"))
+        from kiro.cli import _load_quota_cache
+        assert _load_quota_cache() == {}
+
+    def test_returns_empty_dict_when_no_quota_cache_key(self, tmp_path, monkeypatch):
+        """Returns empty dict when state.json has no quota_cache key."""
+        state_file = tmp_path / "state.json"
+        state_file.write_text('{"accounts": {}}', encoding="utf-8")
+        monkeypatch.setattr("kiro.config.ACCOUNTS_STATE_FILE", str(state_file))
+        from kiro.cli import _load_quota_cache
+        assert _load_quota_cache() == {}
+
+    def test_returns_quota_cache_data(self, tmp_path, monkeypatch):
+        """Returns quota_cache dict from state.json."""
+        import json
+        state_file = tmp_path / "state.json"
+        cache_data = {
+            "/path/to/account1.json": {
+                "totalCredits": 1000,
+                "usedCredits": 150,
+                "remainingCredits": 850,
+                "packageName": "Kiro Pro",
+                "lastFetched": 1700000000.0,
+            }
+        }
+        state_file.write_text(json.dumps({"quota_cache": cache_data}), encoding="utf-8")
+        monkeypatch.setattr("kiro.config.ACCOUNTS_STATE_FILE", str(state_file))
+        from kiro.cli import _load_quota_cache
+        result = _load_quota_cache()
+        assert result == cache_data
+
+    def test_returns_empty_dict_on_corrupt_json(self, tmp_path, monkeypatch):
+        """Returns empty dict when state.json is corrupt."""
+        state_file = tmp_path / "state.json"
+        state_file.write_text("not valid json{{{", encoding="utf-8")
+        monkeypatch.setattr("kiro.config.ACCOUNTS_STATE_FILE", str(state_file))
+        from kiro.cli import _load_quota_cache
+        assert _load_quota_cache() == {}
+
+
+class TestParseQuotaResponse:
+    """Tests for _parse_quota_response() function."""
+
+    def test_empty_usage_list_returns_free(self):
+        """Empty usageBreakdownList returns Free with 0 credits."""
+        from kiro.cli import _parse_quota_response
+        result = _parse_quota_response({"usageBreakdownList": []})
+        assert result["_ok"] is True
+        assert result["totalCredits"] == 0
+        assert result["usedCredits"] == 0
+        assert result["packageName"] == "Free"
+
+    def test_parses_pro_account(self):
+        """Parses standard Pro account usage."""
+        from kiro.cli import _parse_quota_response
+        payload = {
+            "usageBreakdownList": [{
+                "usageLimit": 1000,
+                "currentUsage": 150,
+            }],
+            "subscriptionInfo": {"subscriptionTitle": "Kiro Pro"},
+        }
+        result = _parse_quota_response(payload)
+        assert result["_ok"] is True
+        assert result["totalCredits"] == 1000
+        assert result["usedCredits"] == 150
+        assert result["remainingCredits"] == 850
+        assert result["packageName"] == "Kiro Pro"
+
+    def test_parses_with_free_trial_active(self):
+        """Includes free trial credits when active."""
+        from kiro.cli import _parse_quota_response
+        payload = {
+            "usageBreakdownList": [{
+                "usageLimit": 50,
+                "currentUsage": 10,
+                "freeTrialInfo": {
+                    "freeTrialStatus": "ACTIVE",
+                    "usageLimit": 200,
+                    "currentUsage": 30,
+                },
+            }],
+            "subscriptionType": "Free",
+        }
+        result = _parse_quota_response(payload)
+        assert result["totalCredits"] == 250  # 50 + 200
+        assert result["usedCredits"] == 40    # 10 + 30
+        assert result["remainingCredits"] == 210
+
+    def test_parses_with_bonuses(self):
+        """Includes bonus credits."""
+        from kiro.cli import _parse_quota_response
+        payload = {
+            "usageBreakdownList": [{
+                "usageLimit": 1000,
+                "currentUsage": 500,
+                "bonuses": [
+                    {"usageLimit": 100, "currentUsage": 20},
+                    {"usageLimit": 50, "currentUsage": 10},
+                ],
+            }],
+            "subscriptionTitle": "Kiro Pro",
+        }
+        result = _parse_quota_response(payload)
+        assert result["totalCredits"] == 1150  # 1000 + 100 + 50
+        assert result["usedCredits"] == 530    # 500 + 20 + 10
+        assert result["remainingCredits"] == 620
+
+    def test_remaining_never_negative(self):
+        """Remaining credits floor at 0."""
+        from kiro.cli import _parse_quota_response
+        payload = {
+            "usageBreakdownList": [{
+                "usageLimit": 100,
+                "currentUsage": 150,  # Over limit
+            }],
+            "subscriptionType": "Free",
+        }
+        result = _parse_quota_response(payload)
+        assert result["remainingCredits"] == 0
+
+    def test_uses_precision_fields(self):
+        """Falls back to usageLimitWithPrecision and currentUsageWithPrecision."""
+        from kiro.cli import _parse_quota_response
+        payload = {
+            "usageBreakdownList": [{
+                "usageLimitWithPrecision": 1000,
+                "currentUsageWithPrecision": 987,
+            }],
+            "subscriptionInfo": {"subscriptionTitle": "Kiro Pro"},
+        }
+        result = _parse_quota_response(payload)
+        assert result["totalCredits"] == 1000
+        assert result["usedCredits"] == 987
+        assert result["remainingCredits"] == 13
+
+    def test_no_payload_returns_free(self):
+        """None/empty usage list returns Free."""
+        from kiro.cli import _parse_quota_response
+        result = _parse_quota_response({})
+        assert result["_ok"] is True
+        assert result["packageName"] == "Free"
+
+
+class TestShowAccountsListWithQuota:
+    """Tests for _show_accounts_list() displaying cached quota."""
+
+    def test_displays_cached_quota(self, tmp_path, capsys, monkeypatch):
+        """Shows cached quota next to account name."""
+        import json
+
+        # Create credentials.json
+        creds_file = tmp_path / "credentials.json"
+        creds = [{"type": "json", "path": "/path/to/acct1.json",
+                  "comment": "Added by kiro_login.py (alias=testuser-domain)"}]
+        creds_file.write_text(json.dumps(creds), encoding="utf-8")
+
+        # Create state.json with quota cache
+        state_file = tmp_path / "state.json"
+        state_data = {
+            "quota_cache": {
+                "/path/to/acct1.json": {
+                    "totalCredits": 1000,
+                    "usedCredits": 200,
+                    "remainingCredits": 800,
+                    "packageName": "Kiro Pro",
+                    "lastFetched": 1700000000.0,
+                }
+            }
+        }
+        state_file.write_text(json.dumps(state_data), encoding="utf-8")
+        monkeypatch.setattr("kiro.config.ACCOUNTS_STATE_FILE", str(state_file))
+
+        with patch("kiro.cli._get_account_status", return_value="OK"):
+            from kiro.cli import _show_accounts_list
+            _show_accounts_list(str(creds_file))
+
+        captured = capsys.readouterr()
+        assert "testuser-domain" in captured.out
+        assert "200/1000" in captured.out
+        assert "Kiro Pro" in captured.out
+
+    def test_no_quota_when_cache_empty(self, tmp_path, capsys, monkeypatch):
+        """No quota shown when cache is empty."""
+        import json
+
+        creds_file = tmp_path / "credentials.json"
+        creds = [{"type": "json", "path": "/path/to/acct1.json",
+                  "comment": "Added by kiro_login.py (alias=testuser-domain)"}]
+        creds_file.write_text(json.dumps(creds), encoding="utf-8")
+
+        state_file = tmp_path / "state.json"
+        state_file.write_text(json.dumps({}), encoding="utf-8")
+        monkeypatch.setattr("kiro.config.ACCOUNTS_STATE_FILE", str(state_file))
+
+        with patch("kiro.cli._get_account_status", return_value="OK"):
+            from kiro.cli import _show_accounts_list
+            _show_accounts_list(str(creds_file))
+
+        captured = capsys.readouterr()
+        assert "testuser-domain" in captured.out
+        # No quota numbers should appear
+        assert "/1000" not in captured.out

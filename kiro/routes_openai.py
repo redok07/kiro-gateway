@@ -27,9 +27,14 @@ Contains all API endpoints:
 """
 
 import json
+import time
+import ssl
+import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, Security
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, Security
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from loguru import logger
@@ -37,6 +42,9 @@ from loguru import logger
 from kiro.config import (
     PROXY_API_KEY,
     APP_VERSION,
+    ACCOUNTS_CONFIG_FILE,
+    ACCOUNTS_STATE_FILE,
+    PROFILE_ARN,
 )
 from kiro.models_openai import (
     OpenAIModel,
@@ -119,6 +127,257 @@ async def health():
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "version": APP_VERSION
     }
+
+@router.get("/accounts/quota")
+async def accounts_quota(
+    request: Request,
+    key: str = Query(None, description="API key for authentication"),
+    refresh: bool = Query(False, description="Live fetch quotas from Kiro API"),
+):
+    """
+    Account quota information endpoint.
+
+    Returns quota status for all configured accounts. Accessible via query param auth.
+
+    Args:
+        request: FastAPI Request for accessing app.state
+        key: PROXY_API_KEY passed as query parameter
+        refresh: If true, fetches live quota from Kiro API (slower)
+
+    Returns:
+        JSON with account quota details, status, and summary
+    """
+    if not key or key != PROXY_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing key parameter")
+
+    account_manager = request.app.state.account_manager
+    accounts_dict = account_manager._accounts
+
+    # Build account list from account_manager state
+    account_list = []
+    total_remaining = 0
+    total_limit = 0
+    active_count = 0
+    disabled_count = 0
+
+    # Load cached quota from state.json
+    quota_cache = _load_quota_cache_for_endpoint()
+
+    # If refresh requested, fetch live quotas
+    if refresh:
+        quota_cache = await _fetch_live_quotas()
+
+    for account_id, account in accounts_dict.items():
+        entry = {
+            "id": account_id,
+            "status": "disabled" if account.disabled else "active",
+            "failures": account.failures,
+            "total_requests": account.stats.total_requests,
+            "successful_requests": account.stats.successful_requests,
+            "failed_requests": account.stats.failed_requests,
+        }
+
+        if account.disabled:
+            entry["disabled_reason"] = account.disabled_reason
+            entry["disabled_at"] = datetime.fromtimestamp(
+                account.disabled_at, tz=timezone.utc
+            ).isoformat() if account.disabled_at else None
+            disabled_count += 1
+        else:
+            active_count += 1
+
+        # Attach quota info from cache
+        cached = quota_cache.get(account_id)
+        if cached:
+            entry["package"] = cached.get("packageName", "Unknown")
+            entry["used"] = cached.get("usedCredits", 0)
+            entry["limit"] = cached.get("totalCredits", 0)
+            entry["remaining"] = cached.get("remainingCredits", 0)
+            entry["last_checked"] = cached.get("lastFetched")
+            total_remaining += entry["remaining"]
+            total_limit += entry["limit"]
+
+        account_list.append(entry)
+
+    return {
+        "total_accounts": len(accounts_dict),
+        "active_accounts": active_count,
+        "disabled_accounts": disabled_count,
+        "accounts": account_list,
+        "summary": {
+            "total_remaining": total_remaining,
+            "total_limit": total_limit,
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _load_quota_cache_for_endpoint() -> dict:
+    """Load cached quota data from state.json for the endpoint.
+
+    Returns:
+        Dict mapping account_id to quota info.
+    """
+    state_path = Path(ACCOUNTS_STATE_FILE)
+    if not state_path.exists():
+        return {}
+
+    try:
+        state_data = json.loads(state_path.read_text(encoding="utf-8"))
+        return state_data.get("quota_cache", {})
+    except Exception:
+        return {}
+
+
+async def _fetch_live_quotas() -> dict:
+    """Fetch live quota from Kiro API for all accounts.
+
+    Reads credential files from ACCOUNTS_CONFIG_FILE, fetches quota in parallel,
+    updates state.json quota_cache, and returns the cache dict.
+
+    Returns:
+        Dict mapping account path to quota info.
+    """
+    import httpx
+
+    KIRO_USAGE_ENDPOINT = "https://q.us-east-1.amazonaws.com/getUsageLimits"
+
+    config_path = Path(ACCOUNTS_CONFIG_FILE)
+    if not config_path.exists():
+        logger.warning(f"Credentials file not found: {config_path}")
+        return {}
+
+    try:
+        accounts = json.loads(config_path.read_text(encoding="utf-8"))
+        if not isinstance(accounts, list) or not accounts:
+            return {}
+    except Exception as e:
+        logger.error(f"Error reading credentials file: {e}")
+        return {}
+
+    async def fetch_single(client: httpx.AsyncClient, entry: dict) -> tuple:
+        """Fetch quota for a single account. Returns (path, result_dict)."""
+        entry_path = entry.get("path", "")
+        if not entry_path:
+            return (entry_path, None)
+
+        cred_path = Path(entry_path)
+        if not cred_path.exists():
+            return (entry_path, None)
+
+        try:
+            cred_data = json.loads(cred_path.read_text(encoding="utf-8"))
+        except Exception:
+            return (entry_path, None)
+
+        access_token = cred_data.get("accessToken", "")
+        if not access_token:
+            return (entry_path, None)
+
+        params = {"origin": "AI_EDITOR", "resourceType": "AGENTIC_REQUEST"}
+        if PROFILE_ARN:
+            params["profileArn"] = PROFILE_ARN
+
+        try:
+            resp = await client.get(
+                KIRO_USAGE_ENDPOINT,
+                params=params,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "kiro-ide/1.0.0",
+                },
+            )
+            if resp.status_code != 200:
+                return (entry_path, None)
+            payload = resp.json()
+            return (entry_path, _parse_quota_for_endpoint(payload))
+        except Exception:
+            return (entry_path, None)
+
+    # Fetch all in parallel
+    async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+        tasks = [fetch_single(client, entry) for entry in accounts]
+        results = await asyncio.gather(*tasks)
+
+    # Build cache and persist
+    now_ts = time.time()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    quota_cache = {}
+
+    for entry_path, result in results:
+        if result and entry_path:
+            result["lastFetched"] = now_iso
+            quota_cache[entry_path] = result
+
+    # Save to state.json
+    if quota_cache:
+        state_path = Path(ACCOUNTS_STATE_FILE)
+        state_data = {}
+        if state_path.exists():
+            try:
+                state_data = json.loads(state_path.read_text(encoding="utf-8"))
+            except Exception:
+                state_data = {}
+
+        if "quota_cache" not in state_data:
+            state_data["quota_cache"] = {}
+        state_data["quota_cache"].update(quota_cache)
+
+        try:
+            tmp_path = state_path.with_suffix(".json.tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(state_data, f, indent=2, ensure_ascii=False)
+            tmp_path.replace(state_path)
+            logger.info(f"Quota cache updated: {len(quota_cache)} accounts")
+        except Exception as e:
+            logger.error(f"Failed to save quota cache: {e}")
+
+    return quota_cache
+
+
+def _parse_quota_for_endpoint(payload: dict) -> dict:
+    """Parse Kiro usage API response into quota dict.
+
+    Args:
+        payload: Raw response from getUsageLimits API
+
+    Returns:
+        Dict with totalCredits, usedCredits, remainingCredits, packageName
+    """
+    usage_list = payload.get("usageBreakdownList") or []
+    if not usage_list:
+        return {"totalCredits": 0, "usedCredits": 0,
+                "remainingCredits": 0, "packageName": "Free"}
+
+    usage = usage_list[0] or {}
+    total = float(usage.get("usageLimit") or usage.get("usageLimitWithPrecision") or 0)
+    used = float(usage.get("currentUsage") or usage.get("currentUsageWithPrecision") or 0)
+
+    ft = usage.get("freeTrialInfo") or {}
+    if str(ft.get("freeTrialStatus") or "").upper() == "ACTIVE":
+        total += float(ft.get("usageLimit") or ft.get("usageLimitWithPrecision") or 0)
+        used += float(ft.get("currentUsage") or ft.get("currentUsageWithPrecision") or 0)
+
+    for bonus in usage.get("bonuses") or []:
+        total += float((bonus or {}).get("usageLimit") or 0)
+        used += float((bonus or {}).get("currentUsage") or 0)
+
+    remaining = max(total - used, 0)
+    sub_title = str(
+        payload.get("subscriptionInfo", {}).get("subscriptionTitle")
+        or payload.get("subscriptionTitle")
+        or payload.get("subscriptionType")
+        or "Free"
+    ).strip()
+
+    return {
+        "totalCredits": total,
+        "usedCredits": used,
+        "remainingCredits": remaining,
+        "packageName": sub_title,
+    }
+
 
 @router.get("/v1/models", response_model=ModelList, dependencies=[Depends(verify_api_key)])
 async def get_models(request: Request):
