@@ -60,10 +60,12 @@ from kiro.config import (
     FALLBACK_MODELS,
     ROTATION_STRATEGY,
     BACKGROUND_REFRESH_INTERVAL,
+    KIRO_ENABLE_OVERAGE,
 )
 from kiro.utils import get_kiro_headers
 from kiro.account_errors import ErrorType
 from kiro.http_client import KiroHttpClient
+from kiro.preferences import enable_overage
 from kiro.queue_config import FAST_429_RECOVERY_SECONDS
 
 
@@ -636,6 +638,9 @@ class AccountManager:
             
             # Get token to verify credentials
             token = await auth_manager.get_access_token()
+
+            if KIRO_ENABLE_OVERAGE:
+                await enable_overage(auth_manager)
             
             # Fetch models list with retry + fallback
             params = {"origin": "AI_EDITOR"}

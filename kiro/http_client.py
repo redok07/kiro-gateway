@@ -31,7 +31,7 @@ with connection pooling for better resource management.
 """
 
 import asyncio
-from typing import Optional
+from typing import Any, Callable, Dict, Optional
 
 import httpx
 from fastapi import HTTPException
@@ -174,7 +174,8 @@ class KiroHttpClient:
         url: str,
         json_data: Optional[dict] = None,
         params: Optional[dict] = None,
-        stream: bool = False
+        stream: bool = False,
+        headers_transform: Optional[Callable[[Dict[str, str]], Dict[str, str]]] = None,
     ) -> httpx.Response:
         """
         Executes an HTTP request with retry logic.
@@ -194,6 +195,8 @@ class KiroHttpClient:
             json_data: Optional JSON body (for POST/PUT/PATCH)
             params: Optional query parameters (for GET)
             stream: Use streaming (default False)
+            headers_transform: Optional callback to adjust standard Kiro headers
+                for operation-specific AWS JSON protocol requirements.
         
         Returns:
             httpx.Response with successful response
@@ -215,9 +218,11 @@ class KiroHttpClient:
                 # Get current token
                 token = await self.auth_manager.get_access_token()
                 headers = get_kiro_headers(self.auth_manager, token)
+                if headers_transform:
+                    headers = headers_transform(headers)
                 
                 # Build request kwargs based on parameters
-                request_kwargs = {"headers": headers}
+                request_kwargs: dict[str, Any] = {"headers": headers}
                 
                 if json_data is not None:
                     request_kwargs["json"] = json_data

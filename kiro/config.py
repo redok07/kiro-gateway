@@ -195,6 +195,10 @@ KIRO_API_HOST_TEMPLATE: str = "https://q.{region}.amazonaws.com"
 # Host for Q API (ListAvailableModels)
 KIRO_Q_HOST_TEMPLATE: str = "https://q.{region}.amazonaws.com"
 
+# AWS CodeWhisperer SetUserPreference operation target.
+# Used to enable/disable account-level overage configuration.
+KIRO_SET_USER_PREFERENCE_TARGET: str = "AmazonCodeWhispererService.SetUserPreference"
+
 # ==================================================================================================
 # Token Settings
 # ==================================================================================================
@@ -517,6 +521,11 @@ WEB_SEARCH_ENABLED: bool = os.getenv("WEB_SEARCH_ENABLED", "true").lower() in ("
 # When false: uses first account without failover (legacy mode)
 # When true: enables full failover loop with Circuit Breaker
 ACCOUNT_SYSTEM: bool = os.getenv("ACCOUNT_SYSTEM", "false").lower() in ("true", "1", "yes")
+
+# Enable Kiro/Amazon Q overage automatically during account initialization.
+# When enabled, each Kiro Desktop account with a profileArn receives a
+# SetUserPreference request setting overageConfiguration.overageStatus=ENABLED.
+KIRO_ENABLE_OVERAGE: bool = os.getenv("KIRO_ENABLE_OVERAGE", "false").lower() in ("true", "1", "yes")
 
 # Path to credentials configuration file (resolve relative to active env dir)
 _accounts_config_raw: str = os.getenv("ACCOUNTS_CONFIG_FILE", "credentials.json")
