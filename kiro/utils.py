@@ -54,6 +54,10 @@ def _compute_machine_fingerprint() -> str:
 # Cached at module load - never changes during process lifetime
 _MACHINE_FINGERPRINT: str = _compute_machine_fingerprint()
 
+# Current Kiro IDE user-agent identifiers used for outbound Kiro service calls.
+KIRO_USER_AGENT: str = "aws-sdk-js/1.0.36 ua/2.1 os/darwin#24.6.0 lang/js md/nodejs#22.22.0 api/codewhispererstreaming#1.0.36 m/E KiroIDE-0.12.200"
+KIRO_X_AMZ_USER_AGENT: str = "aws-sdk-js/1.0.36 KiroIDE-0.12.200"
+
 
 def get_machine_fingerprint() -> str:
     """
@@ -84,11 +88,10 @@ def get_kiro_headers(auth_manager: "KiroAuthManager", token: str) -> dict:
     """
     base = auth_manager._cached_headers
     if base is None:
-        fingerprint = auth_manager.fingerprint
         base = {
             "Content-Type": "application/json",
-            "User-Agent": f"aws-sdk-js/1.0.27 ua/2.1 os/win32#10.0.19044 lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E KiroIDE-0.7.45-{fingerprint}",
-            "x-amz-user-agent": f"aws-sdk-js/1.0.27 KiroIDE-0.7.45-{fingerprint}",
+            "User-Agent": KIRO_USER_AGENT,
+            "x-amz-user-agent": KIRO_X_AMZ_USER_AGENT,
             "x-amzn-codewhisperer-optout": "true",
             "x-amzn-kiro-agent-mode": "vibe",
             "amz-sdk-request": "attempt=1; max=3",

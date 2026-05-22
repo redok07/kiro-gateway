@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from kiro.http_client import KiroHttpClient
 from kiro.auth import KiroAuthManager
 from kiro.config import MAX_RETRIES, BASE_RETRY_DELAY, FIRST_TOKEN_MAX_RETRIES, STREAMING_READ_TIMEOUT
+from kiro.utils import KIRO_USER_AGENT, KIRO_X_AMZ_USER_AGENT, get_kiro_headers
 
 
 @pytest.fixture
@@ -26,6 +27,7 @@ def mock_auth_manager_for_http():
     manager.force_refresh = AsyncMock(return_value="new_access_token")
     manager.fingerprint = "test_fingerprint_12345678"
     manager._fingerprint = "test_fingerprint_12345678"
+    manager._cached_headers = None
     return manager
 
 
@@ -42,6 +44,19 @@ class TestKiroHttpClientInitialization:
         
         print("Verification: auth_manager is stored...")
         assert client.auth_manager is mock_auth_manager_for_http
+
+    def test_get_kiro_headers_uses_current_kiro_user_agents(self, mock_auth_manager_for_http):
+        """
+        What it does: Verifies standard Kiro headers use the current KiroIDE user agents.
+        Purpose: Prevent regressions to stale SDK, Node.js, OS, or KiroIDE identifiers.
+        """
+        print("Setup: Building Kiro headers with test token...")
+
+        headers = get_kiro_headers(mock_auth_manager_for_http, "test_access_token")
+
+        print("Verification: Headers contain exact current Kiro user-agent strings...")
+        assert headers["User-Agent"] == KIRO_USER_AGENT
+        assert headers["x-amz-user-agent"] == KIRO_X_AMZ_USER_AGENT
     
     def test_initialization_client_is_none(self, mock_auth_manager_for_http):
         """
@@ -212,6 +227,42 @@ class TestKiroHttpClientRequestWithRetry:
         print("Verification: Response received...")
         assert response.status_code == 200
         mock_client.request.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_headers_transform_adjusts_standard_headers(self, mock_auth_manager_for_http):
+        """
+        What it does: Applies an operation-specific header transform.
+        Purpose: Ensure AWS JSON protocol operations can reuse retry logic safely.
+        """
+        print("Setup: Creating KiroHttpClient with mocked standard headers...")
+        http_client = KiroHttpClient(mock_auth_manager_for_http)
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        def add_target(headers):
+            adjusted = headers.copy()
+            adjusted["Content-Type"] = "application/x-amz-json-1.0"
+            adjusted["x-amz-target"] = "AmazonCodeWhispererService.SetUserPreference"
+            return adjusted
+
+        print("Action: Executing request with header transform...")
+        with patch.object(http_client, '_get_client', return_value=mock_client):
+            with patch('kiro.http_client.get_kiro_headers', return_value={"Content-Type": "application/json"}):
+                response = await http_client.request_with_retry(
+                    "POST",
+                    "https://api.example.com/test",
+                    {"data": "value"},
+                    headers_transform=add_target,
+                )
+
+        print("Verification: Transformed headers were sent...")
+        assert response.status_code == 200
+        sent_headers = mock_client.request.call_args.kwargs["headers"]
+        assert sent_headers["Content-Type"] == "application/x-amz-json-1.0"
+        assert sent_headers["x-amz-target"] == "AmazonCodeWhispererService.SetUserPreference"
     
     @pytest.mark.asyncio
     async def test_403_triggers_token_refresh(self, mock_auth_manager_for_http):
