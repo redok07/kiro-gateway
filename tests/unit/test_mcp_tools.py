@@ -26,6 +26,7 @@ from kiro.mcp_tools import (
     generate_anthropic_web_search_sse,
     generate_openai_web_search_sse
 )
+from kiro.utils import KIRO_USER_AGENT, KIRO_X_AMZ_USER_AGENT
 
 
 # ==================================================================================================
@@ -146,6 +147,37 @@ class TestCallKiroMCPAPI:
         assert results["totalResults"] == 1
         assert results["results"][0]["title"] == "Python Tutorial"
         assert results["results"][0]["url"] == "https://python.org"
+
+    @pytest.mark.asyncio
+    async def test_mcp_api_sends_current_kiro_user_agent_headers(self, mock_auth_manager):
+        """
+        What it does: Verifies MCP requests include the current KiroIDE user-agent headers.
+        Purpose: Ensure all outbound Kiro server calls use the same Kiro identity.
+        """
+        print("Setup: Mocking successful MCP API response...")
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json = Mock(return_value={
+            "id": "web_search_tooluse_abc123_1234567890_xyz",
+            "jsonrpc": "2.0",
+            "result": {
+                "content": [{"type": "text", "text": json.dumps({"results": [], "totalResults": 0})}],
+                "isError": False,
+            },
+        })
+
+        mock_post = AsyncMock(return_value=mock_response)
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value.post = mock_post
+
+        print("Action: Calling call_kiro_mcp_api...")
+        with patch("kiro.mcp_tools.httpx.AsyncClient", return_value=mock_client):
+            await call_kiro_mcp_api("Python tutorials", mock_auth_manager)
+
+        print("Verification: MCP request includes standardized Kiro headers...")
+        headers = mock_post.call_args.kwargs["headers"]
+        assert headers["User-Agent"] == KIRO_USER_AGENT
+        assert headers["x-amz-user-agent"] == KIRO_X_AMZ_USER_AGENT
     
     @pytest.mark.asyncio
     async def test_mcp_api_error_response(self, mock_auth_manager):

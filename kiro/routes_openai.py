@@ -57,7 +57,7 @@ from kiro.model_resolver import ModelResolver
 from kiro.converters_openai import build_kiro_payload
 from kiro.streaming_openai import stream_kiro_to_openai, collect_stream_response, stream_with_first_token_retry
 from kiro.http_client import KiroHttpClient
-from kiro.utils import generate_conversation_id
+from kiro.utils import KIRO_USER_AGENT, KIRO_X_AMZ_USER_AGENT, generate_conversation_id
 from kiro.config import WEB_SEARCH_ENABLED
 from kiro.mcp_tools import handle_native_web_search
 from kiro.queue_config import QUEUE_ENABLED
@@ -285,7 +285,8 @@ async def _fetch_live_quotas() -> dict:
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json",
-                    "User-Agent": "kiro-ide/1.0.0",
+                    "User-Agent": KIRO_USER_AGENT,
+                    "x-amz-user-agent": KIRO_X_AMZ_USER_AGENT,
                 },
             )
             if resp.status_code != 200:

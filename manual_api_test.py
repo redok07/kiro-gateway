@@ -43,6 +43,8 @@ class AuthType(Enum):
 # API region - CodeWhisperer API is only available in us-east-1
 API_REGION = "us-east-1"
 KIRO_API_HOST = f"https://q.{API_REGION}.amazonaws.com"
+KIRO_USER_AGENT = "aws-sdk-js/1.0.36 ua/2.1 os/darwin#24.6.0 lang/js md/nodejs#22.22.0 api/codewhispererstreaming#1.0.36 m/E KiroIDE-0.12.200"
+KIRO_X_AMZ_USER_AGENT = "aws-sdk-js/1.0.36 KiroIDE-0.12.200"
 KIRO_DESKTOP_TOKEN_URL = f"https://prod.{API_REGION}.auth.desktop.kiro.dev/refreshToken"
 
 # SSO region - may differ from API region (e.g., ap-southeast-1 for Singapore users)
@@ -216,8 +218,8 @@ AUTH_TOKEN = None
 HEADERS = {
     "Authorization": None,
     "Content-Type": "application/json",
-    "User-Agent": "aws-sdk-js/1.0.27 ua/2.1 os/win32#10.0.19044 lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E KiroIDE-0.7.45-31c325a0ff0a9c8dec5d13048f4257462d751fe5b8af4cb1088f1fca45856c64",
-    "x-amz-user-agent": "aws-sdk-js/1.0.27 KiroIDE-0.7.45-31c325a0ff0a9c8dec5d13048f4257462d751fe5b8af4cb1088f1fca45856c64",
+    "User-Agent": KIRO_USER_AGENT,
+    "x-amz-user-agent": KIRO_X_AMZ_USER_AGENT,
     "x-amzn-codewhisperer-optout": "true",
     "x-amzn-kiro-agent-mode": "vibe",
 }
@@ -241,7 +243,8 @@ def refresh_auth_token_kiro_desktop():
     payload = {"refreshToken": REFRESH_TOKEN}
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "KiroIDE-0.7.45-31c325a0ff0a9c8dec5d13048f4257462d751fe5b8af4cb1088f1fca45856c64",
+        "User-Agent": KIRO_USER_AGENT,
+        "x-amz-user-agent": KIRO_X_AMZ_USER_AGENT,
     }
     
     try:

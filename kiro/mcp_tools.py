@@ -41,6 +41,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 
 from kiro.tokenizer import count_message_tokens, count_tokens
+from kiro.utils import KIRO_USER_AGENT, KIRO_X_AMZ_USER_AGENT
 
 # Import debug_logger
 try:
@@ -151,7 +152,9 @@ async def call_kiro_mcp_api(
         headers = {
             "Authorization": f"Bearer {token}",
             "x-amzn-codewhisperer-optout": "false",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "User-Agent": KIRO_USER_AGENT,
+            "x-amz-user-agent": KIRO_X_AMZ_USER_AGENT,
         }
         
         mcp_url = f"{auth_manager.q_host}/mcp"

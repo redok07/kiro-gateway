@@ -87,6 +87,8 @@ KIRO_LOGIN_ENDPOINT = f"{KIRO_AUTH_BASE}/login"
 KIRO_TOKEN_ENDPOINT = f"{KIRO_AUTH_BASE}/oauth/token"
 KIRO_REDIRECT_URI = "kiro://kiro.kiroAgent/authenticate-success"
 KIRO_USAGE_ENDPOINT = "https://q.us-east-1.amazonaws.com/getUsageLimits"
+KIRO_USER_AGENT = "aws-sdk-js/1.0.36 ua/2.1 os/darwin#24.6.0 lang/js md/nodejs#22.22.0 api/codewhispererstreaming#1.0.36 m/E KiroIDE-0.12.200"
+KIRO_X_AMZ_USER_AGENT = "aws-sdk-js/1.0.36 KiroIDE-0.12.200"
 
 DEFAULT_REGION = "us-east-1"
 DEFAULT_OUTPUT_DIR = Path.home() / ".aws" / "sso" / "cache"
@@ -226,7 +228,8 @@ async def fetch_kiro_usage(access_token: str, profile_arn: str = "") -> Optional
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json",
-                    "User-Agent": "kiro-ide/1.0.0",
+                    "User-Agent": KIRO_USER_AGENT,
+                    "x-amz-user-agent": KIRO_X_AMZ_USER_AGENT,
                 },
                 ssl=_SSL_CTX,
             ) as resp:

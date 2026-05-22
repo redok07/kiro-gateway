@@ -501,6 +501,7 @@ def _refresh_quotas(config_path: str) -> None:
         return
 
     from kiro.config import ACCOUNTS_STATE_FILE, PROFILE_ARN
+    from kiro.utils import KIRO_USER_AGENT, KIRO_X_AMZ_USER_AGENT
 
     KIRO_USAGE_ENDPOINT = "https://q.us-east-1.amazonaws.com/getUsageLimits"
 
@@ -560,7 +561,8 @@ def _refresh_quotas(config_path: str) -> None:
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json",
-                    "User-Agent": "kiro-ide/1.0.0",
+                    "User-Agent": KIRO_USER_AGENT,
+                    "x-amz-user-agent": KIRO_X_AMZ_USER_AGENT,
                 },
                 ssl=ssl_ctx,
             ) as resp:

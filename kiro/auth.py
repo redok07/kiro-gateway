@@ -48,6 +48,7 @@ from kiro.config import (
     get_kiro_q_host,
     get_aws_sso_oidc_url,
 )
+from kiro.utils import KIRO_USER_AGENT, KIRO_X_AMZ_USER_AGENT
 from kiro.utils import get_machine_fingerprint
 
 
@@ -702,7 +703,8 @@ class KiroAuthManager:
         payload = {'refreshToken': self._refresh_token}
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": f"KiroIDE-0.7.45-{self._fingerprint}",
+            "User-Agent": KIRO_USER_AGENT,
+            "x-amz-user-agent": KIRO_X_AMZ_USER_AGENT,
         }
         
         async with httpx.AsyncClient(timeout=30) as client:

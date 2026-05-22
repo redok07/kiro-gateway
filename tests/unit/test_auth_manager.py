@@ -14,6 +14,7 @@ import httpx
 
 from kiro.auth import KiroAuthManager, AuthType
 from kiro.config import TOKEN_REFRESH_THRESHOLD, get_aws_sso_oidc_url
+from kiro.utils import KIRO_USER_AGENT, KIRO_X_AMZ_USER_AGENT
 
 
 class TestKiroAuthManagerInitialization:
@@ -224,6 +225,11 @@ class TestKiroAuthManagerTokenRefresh:
             
             print("Verification: POST request was made...")
             mock_client.post.assert_called_once()
+
+            print("Verification: Token refresh used standardized Kiro headers...")
+            headers = mock_client.post.call_args.kwargs["headers"]
+            assert headers["User-Agent"] == KIRO_USER_AGENT
+            assert headers["x-amz-user-agent"] == KIRO_X_AMZ_USER_AGENT
     
     @pytest.mark.asyncio
     async def test_refresh_token_updates_refresh_token(self, mock_kiro_token_response):
